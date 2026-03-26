@@ -344,14 +344,37 @@ def toggle_clip_prompt(conn: sqlite3.Connection, prompt_id: int, enabled: bool) 
 
 
 def seed_default_clip_prompts(conn: sqlite3.Connection) -> None:
-    """Insert default CLIP prompts if the table is empty."""
+    """Insert default CLIP prompts if the table is empty. Uses vocabulary_presets."""
     count = conn.execute("SELECT COUNT(*) as c FROM clip_prompt").fetchone()["c"]
     if count > 0:
         return
-    from vaction.detectors.clip import DEFAULT_SCENE_PROMPTS, DEFAULT_ATTRIBUTE_PROMPTS, PROMPT_LABELS
-    for prompt in DEFAULT_SCENE_PROMPTS:
-        label = PROMPT_LABELS.get(prompt, prompt.lower().replace(" ", "_"))
-        add_clip_prompt(conn, prompt, label, "scene")
-    for prompt in DEFAULT_ATTRIBUTE_PROMPTS:
-        label = PROMPT_LABELS.get(prompt, prompt.lower().replace(" ", "_"))
-        add_clip_prompt(conn, prompt, label, "attribute")
+    from vaction.vocabulary_presets import get_prompts_for_level
+    # Seed with medium preset by default
+    for p in get_prompts_for_level(2):
+        add_clip_prompt(conn, p["prompt"], p["label"], p["category"])
+
+
+def load_vocabulary_preset(conn: sqlite3.Connection, level: int) -> int:
+    """Replace all CLIP prompts with those from the given preset level (1/2/3).
+    Returns the number of prompts loaded."""
+    from vaction.vocabulary_presets import get_prompts_for_level
+    prompts = get_prompts_for_level(level)
+    # Clear existing
+    conn.execute("DELETE FROM clip_prompt")
+    conn.commit()
+    for p in prompts:
+        add_clip_prompt(conn, p["prompt"], p["label"], p["category"])
+    return len(prompts)
+
+
+def seed_default_themes(conn: sqlite3.Connection) -> int:
+    """Seed default themes from vocabulary_presets if no themes exist. Returns count created."""
+    count = conn.execute("SELECT COUNT(*) as c FROM theme").fetchone()["c"]
+    if count > 0:
+        return 0
+    from vaction.vocabulary_presets import DEFAULT_THEMES
+    created = 0
+    for t in DEFAULT_THEMES:
+        create_theme(conn, t["name"], t["description"], t["labels"])
+        created += 1
+    return created

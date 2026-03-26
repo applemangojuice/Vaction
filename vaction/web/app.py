@@ -18,7 +18,7 @@ from vaction.db import (
     db_session, get_aliases, get_connection, init_db, insert_alias,
     create_theme, update_theme, delete_theme, get_all_themes, get_theme_labels,
     get_clip_prompts, add_clip_prompt, delete_clip_prompt, toggle_clip_prompt,
-    seed_default_clip_prompts,
+    seed_default_clip_prompts, load_vocabulary_preset, seed_default_themes,
 )
 
 app = Flask(
@@ -82,6 +82,11 @@ def vocabulary_page():
 @app.route("/themes")
 def themes_page():
     return render_template("themes.html")
+
+
+@app.route("/charts")
+def charts_page():
+    return render_template("charts.html")
 
 
 @app.route("/faces")
@@ -224,6 +229,7 @@ def api_detect():
     series_name = data.get("series", "").strip()
     detectors = data.get("detectors", "yolo,clip")
     batch_size = int(data.get("batch_size", 16))
+    force = data.get("force", False)  # Re-detect even if already detected
 
     if not series_name:
         return jsonify({"error": "series is required"}), 400
@@ -271,6 +277,54 @@ def api_detect():
 
                 q.put({"event": "status", "data": "Models loaded. Querying frames..."})
 
+                # If force mode, clear existing detections for this series first
+                if force:
+                    q.put({"event": "status", "data": "Force mode: clearing existing detections..."})
+                    # Get the specific detectors being re-run
+                    conn.execute("""
+                        DELETE FROM detection WHERE id IN (
+                            SELECT d.id FROM detection d
+                            JOIN frame f ON d.frame_id = f.id
+                            JOIN episode e ON f.episode_id = e.id
+                            JOIN season s ON e.season_id = s.id
+                            JOIN series sr ON s.series_id = sr.id
+                            WHERE sr.name = ? AND d.detector IN ({})
+                        )
+                    """.format(",".join("?" * len(detector_names))),
+                        (series_name, *detector_names),
+                    )
+                    conn.commit()
+
+                # Count total frames for this series
+                total_all = conn.execute("""
+                    SELECT COUNT(*) as c FROM frame f
+                    JOIN episode e ON f.episode_id = e.id
+                    JOIN season s ON e.season_id = s.id
+                    JOIN series sr ON s.series_id = sr.id
+                    WHERE sr.name = ?
+                """, (series_name,)).fetchone()["c"]
+
+                # Count frames with file paths
+                total_with_files = conn.execute("""
+                    SELECT COUNT(*) as c FROM frame f
+                    JOIN episode e ON f.episode_id = e.id
+                    JOIN season s ON e.season_id = s.id
+                    JOIN series sr ON s.series_id = sr.id
+                    WHERE sr.name = ? AND f.file_path IS NOT NULL
+                """, (series_name,)).fetchone()["c"]
+
+                # Count already-detected frames
+                already_detected = conn.execute("""
+                    SELECT COUNT(DISTINCT f.id) as c FROM frame f
+                    JOIN detection d ON d.frame_id = f.id
+                    JOIN episode e ON f.episode_id = e.id
+                    JOIN season s ON e.season_id = s.id
+                    JOIN series sr ON s.series_id = sr.id
+                    WHERE sr.name = ?
+                """, (series_name,)).fetchone()["c"]
+
+                q.put({"event": "status", "data": f"Series '{series_name}': {total_all} total frames, {total_with_files} with files, {already_detected} already detected"})
+
                 frames_query = """
                     SELECT f.id, f.file_path, e.width, e.height
                     FROM frame f
@@ -278,12 +332,22 @@ def api_detect():
                     JOIN season s ON e.season_id = s.id
                     JOIN series sr ON s.series_id = sr.id
                     WHERE sr.name = ? AND f.file_path IS NOT NULL
-                      AND f.id NOT IN (SELECT DISTINCT frame_id FROM detection)
-                    ORDER BY f.id
                 """
-                frames = conn.execute(frames_query, (series_name,)).fetchall()
+                params = [series_name]
+
+                if not force:
+                    frames_query += " AND f.id NOT IN (SELECT DISTINCT frame_id FROM detection)"
+
+                frames_query += " ORDER BY f.id"
+                frames = conn.execute(frames_query, params).fetchall()
 
                 if not frames:
+                    msg = "No unprocessed frames found."
+                    if already_detected > 0 and not force:
+                        msg += f" {already_detected} frames already detected. Enable 'Force re-detect' to re-run."
+                    elif total_with_files == 0:
+                        msg += f" {total_all} frames exist but none have file paths. Frame files may have been deleted."
+                    q.put({"event": "status", "data": msg})
                     q.put({"event": "complete", "data": json.dumps({"total_detections": 0, "frames_processed": 0})})
                     return
 
@@ -457,10 +521,13 @@ def api_alias():
 
 @app.route("/api/chart")
 def api_chart():
-    """Return data suitable for charting: episode share across episodes for one or more terms."""
+    """Return data suitable for charting: episode share across episodes for one or more terms.
+    Optional params: episodes (comma-separated e.g. S01E01,S01E02) to filter.
+    """
     series_name = request.args.get("series", "").strip()
     terms = request.args.get("terms", "").strip()  # comma-separated
     confidence = float(request.args.get("confidence", 0.25))
+    episode_filter = request.args.get("episodes", "").strip()  # comma-separated S01E01 codes
 
     if not series_name or not terms:
         return jsonify({"error": "series and terms are required"}), 400
@@ -475,7 +542,7 @@ def api_chart():
 
         # Get all episodes for the x-axis
         episodes = conn.execute("""
-            SELECT e.number as ep_num, s.number as season_num, e.title
+            SELECT e.number as ep_num, s.number as season_num, e.title, e.id as ep_id
             FROM episode e
             JOIN season s ON e.season_id = s.id
             WHERE s.series_id = ?
@@ -483,6 +550,14 @@ def api_chart():
         """, (row["id"],)).fetchall()
 
         ep_labels = [f"S{e['season_num']:02d}E{e['ep_num']:02d}" for e in episodes]
+
+        # Apply episode filter
+        if episode_filter:
+            filter_set = {e.strip().upper() for e in episode_filter.split(",") if e.strip()}
+            filtered_indices = [i for i, lbl in enumerate(ep_labels) if lbl in filter_set]
+            ep_labels = [ep_labels[i] for i in filtered_indices]
+        else:
+            filtered_indices = list(range(len(ep_labels)))
 
         term_list = [t.strip() for t in terms.split(",") if t.strip()]
         datasets = []
@@ -496,10 +571,36 @@ def api_chart():
                 key = f"S{r.season_number:02d}E{r.episode_number:02d}"
                 ep_map[key] = round(r.episode_share_pct, 4)
 
-            data_points = [ep_map.get(label, 0) for label in ep_labels]
+            data_points = [ep_map.get(ep_labels[j], 0) for j in range(len(ep_labels))]
             datasets.append({"term": term, "data": data_points})
 
         return jsonify({"labels": ep_labels, "datasets": datasets})
+    finally:
+        conn.close()
+
+
+@app.route("/api/episodes")
+def api_episodes():
+    """Return all episodes for a series (for chart episode picker)."""
+    series_name = request.args.get("series", "").strip()
+    if not series_name:
+        return jsonify({"episodes": []})
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not row:
+            return jsonify({"episodes": []})
+        episodes = conn.execute("""
+            SELECT e.number as ep_num, s.number as season_num, e.title
+            FROM episode e
+            JOIN season s ON e.season_id = s.id
+            WHERE s.series_id = ?
+            ORDER BY s.number, e.number
+        """, (row["id"],)).fetchall()
+        return jsonify({"episodes": [
+            {"code": f"S{e['season_num']:02d}E{e['ep_num']:02d}", "title": e["title"] or ""}
+            for e in episodes
+        ]})
     finally:
         conn.close()
 
@@ -615,6 +716,30 @@ def api_vocabulary_toggle(prompt_id):
         conn.close()
 
 
+@app.route("/api/vocabulary/preset", methods=["POST"])
+def api_vocabulary_load_preset():
+    """Load a vocabulary preset (low=1, medium=2, high=3). Replaces all existing prompts."""
+    data = request.json
+    level = int(data.get("level", 2))
+    if level not in (1, 2, 3):
+        return jsonify({"error": "level must be 1, 2, or 3"}), 400
+    conn = get_db()
+    try:
+        count = load_vocabulary_preset(conn, level)
+        from vaction.vocabulary_presets import get_level_counts
+        counts = get_level_counts()
+        return jsonify({"ok": True, "loaded": count, "counts": counts})
+    finally:
+        conn.close()
+
+
+@app.route("/api/vocabulary/counts")
+def api_vocabulary_counts():
+    """Return counts for each preset level."""
+    from vaction.vocabulary_presets import get_level_counts
+    return jsonify(get_level_counts())
+
+
 # ── API: Themes ─────────────────────────────────────────────────────────────
 
 
@@ -622,6 +747,7 @@ def api_vocabulary_toggle(prompt_id):
 def api_themes():
     conn = get_db()
     try:
+        seed_default_themes(conn)
         themes = get_all_themes(conn)
         return jsonify({"themes": themes})
     finally:
@@ -746,15 +872,15 @@ def api_faces_scan():
                     JOIN frame f ON d.frame_id = f.id
                     JOIN episode e ON f.episode_id = e.id
                     JOIN season s ON e.season_id = s.id
-                    WHERE s.series_id = ? AND d.detector = 'face'
-                      AND d.label != 'unknown_face'
+                    WHERE s.series_id = ?
+                      AND (d.detector = 'face' OR d.label IN ('face', 'person'))
+                      AND d.bbox_x IS NOT NULL
                       AND f.file_path IS NOT NULL
                     ORDER BY d.confidence DESC
                 """, (series_id,)).fetchall()
 
                 if not face_dets:
-                    # Also check for yolo person detections we could crop faces from
-                    q.put({"event": "status", "data": "No face detections found. Run face detection first."})
+                    q.put({"event": "status", "data": "No face detections found. Run detection with 'Faces only' or 'All' detectors first, then come back here to cluster."})
                     q.put({"event": "complete", "data": json.dumps({"clusters": 0})})
                     return
 

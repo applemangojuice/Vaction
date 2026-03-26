@@ -5,6 +5,20 @@
 <p class="subtitle">Configure what CLIP searches for in each frame. Add custom prompts, enable/disable existing ones.</p>
 
 <div class="card">
+    <h2>Vocabulary Presets</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">
+        Load a preset vocabulary. This <strong>replaces</strong> all current prompts with the selected preset level.
+    </p>
+    <div id="presetCounts" style="font-size:13px; color:#888; margin-bottom:12px;">Loading counts...</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-secondary" onclick="loadPreset(1)" id="presetBtn1">Low — Essentials</button>
+        <button class="btn btn-secondary" onclick="loadPreset(2)" id="presetBtn2">Medium — Balanced</button>
+        <button class="btn" onclick="loadPreset(3)" id="presetBtn3">High — Everything</button>
+    </div>
+    <div id="presetResult" style="margin-top:8px; font-size:13px;"></div>
+</div>
+
+<div class="card">
     <h2>Add New Prompt</h2>
     <p style="color:#666; font-size:13px; margin-bottom:12px;">
         A prompt describes what to look for (e.g. "a red car"), and the label is the short searchable tag (e.g. "red_car").
@@ -163,6 +177,27 @@ const qel = document.getElementById('quickAddPills');
 QUICK_ADD.forEach(q => {
     qel.innerHTML += `<span class="pill" onclick="quickAdd('${q.prompt}','${q.label}','${q.cat}')">${q.label}</span>`;
 });
+
+// Load preset counts
+fetch('/api/vocabulary/counts').then(r=>r.json()).then(data=>{
+    document.getElementById('presetCounts').innerHTML =
+        `<strong>Low:</strong> ${data.low} prompts &nbsp;|&nbsp; <strong>Medium:</strong> ${data.medium} prompts &nbsp;|&nbsp; <strong>High:</strong> ${data.high} prompts`;
+});
+
+function loadPreset(level) {
+    const names = {1: 'Low', 2: 'Medium', 3: 'High'};
+    if (!confirm(`Replace ALL current vocabulary with ${names[level]} preset? This cannot be undone.`)) return;
+    fetch('/api/vocabulary/preset', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({level}),
+    }).then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('presetResult').innerHTML =
+            `<span style="color:#51cf66;">Loaded ${data.loaded} prompts (${names[level]} preset)</span>`;
+        loadVocab();
+    });
+}
 
 loadVocab();
 </script>

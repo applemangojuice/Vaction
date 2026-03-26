@@ -1,0 +1,368 @@
+{% extends "base.html" %}
+{% block title %}Charts — Vaction{% endblock %}
+{% block content %}
+<h1>Advanced Charts</h1>
+<p class="subtitle">Build custom charts with selectable terms, episode filters, chart types, and axes</p>
+
+<!-- Series & Episode Picker -->
+<div class="card">
+    <h2>Data Selection</h2>
+    <div class="row">
+        <div class="form-group">
+            <label>Series</label>
+            <select id="seriesSelect" onchange="onSeriesChange()"><option value="">Loading...</option></select>
+        </div>
+        <div class="form-group">
+            <label>Chart Type</label>
+            <select id="chartType">
+                <option value="line">Line Chart</option>
+                <option value="bar">Bar Chart</option>
+                <option value="bar_stacked">Stacked Bar</option>
+                <option value="radar">Radar Chart</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Y-Axis Metric</label>
+            <select id="yMetric">
+                <option value="episode_share">Episode Share (%)</option>
+                <option value="pixel_time">Pixel-Time (sec)</option>
+                <option value="detection_count">Detection Count</option>
+            </select>
+        </div>
+    </div>
+</div>
+
+<!-- Terms -->
+<div class="card">
+    <h2>Terms / Labels</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:8px;">
+        Enter terms to chart (comma-separated), or click pills below. Themes are auto-expanded.
+    </p>
+    <div class="row">
+        <div class="form-group" style="flex:3;">
+            <input type="text" id="chartTerms" placeholder="e.g. person, hallway, office, danger" />
+        </div>
+        <div class="form-group" style="flex:0 0 auto;">
+            <button class="btn" onclick="buildChart()">Build Chart</button>
+        </div>
+    </div>
+    <div id="termHints" class="pill-row" style="margin-top:4px;"></div>
+    <div id="themeHints" class="pill-row" style="margin-top:8px;"></div>
+</div>
+
+<!-- Episode Filter -->
+<div class="card">
+    <h2>Episode Filter <span style="color:#666; font-size:13px; font-weight:normal;">(optional — leave unchecked for all)</span></h2>
+    <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <button class="btn btn-secondary" style="font-size:12px; padding:4px 12px;" onclick="selectAllEps(true)">Select All</button>
+        <button class="btn btn-secondary" style="font-size:12px; padding:4px 12px;" onclick="selectAllEps(false)">Deselect All</button>
+    </div>
+    <div id="episodeChecks" class="pill-row" style="gap:4px;"></div>
+</div>
+
+<!-- Chart Output -->
+<div class="card" id="chartCard" style="display:none;">
+    <h2 id="chartTitle">Chart</h2>
+    <div class="chart-container" style="height:400px;">
+        <canvas id="mainChart"></canvas>
+    </div>
+</div>
+
+<!-- Pivot Table -->
+<div class="card" id="pivotCard" style="display:none;">
+    <h2>Data Table</h2>
+    <div style="overflow-x:auto;">
+        <table id="pivotTable">
+            <thead id="pivotHead"></thead>
+            <tbody id="pivotBody"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Comparison Chart: two terms side-by-side -->
+<div class="card">
+    <h2>Quick Compare</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:8px;">Compare exactly two terms with a dual-axis or grouped bar chart.</p>
+    <div class="row">
+        <div class="form-group">
+            <label>Term A</label>
+            <input type="text" id="compareA" placeholder="e.g. person" />
+        </div>
+        <div class="form-group">
+            <label>Term B</label>
+            <input type="text" id="compareB" placeholder="e.g. hallway" />
+        </div>
+        <div class="form-group" style="flex:0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="btn btn-secondary" onclick="buildCompare()">Compare</button>
+        </div>
+    </div>
+    <div class="chart-container" style="height:350px;">
+        <canvas id="compareChart"></canvas>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let mainChart = null;
+let compareChartObj = null;
+const COLORS = [
+    '#4a9eff','#ff6b6b','#51cf66','#ffd43b','#cc5de8',
+    '#ff922b','#20c997','#e599f7','#74c0fc','#f06595',
+];
+
+let allEpisodes = [];
+
+// Load series
+fetch('/api/series').then(r=>r.json()).then(data=>{
+    const sel = document.getElementById('seriesSelect');
+    sel.innerHTML = '';
+    if (!data.series.length) {
+        sel.innerHTML = '<option value="">No series — add videos first</option>';
+        return;
+    }
+    data.series.forEach(s=>{
+        sel.innerHTML += `<option value="${s.name}">${s.name}</option>`;
+    });
+    onSeriesChange();
+});
+
+function onSeriesChange() {
+    const series = document.getElementById('seriesSelect').value;
+    if (!series) return;
+    // Load episodes
+    fetch('/api/episodes?series=' + encodeURIComponent(series)).then(r=>r.json()).then(data=>{
+        allEpisodes = data.episodes;
+        const el = document.getElementById('episodeChecks');
+        el.innerHTML = data.episodes.map(ep =>
+            `<label style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;background:#1a1a1a;border-radius:6px;font-size:12px;color:#ccc;cursor:pointer;">
+                <input type="checkbox" class="ep-check" value="${ep.code}" checked style="cursor:pointer;" />
+                ${ep.code}${ep.title ? ' — ' + ep.title : ''}
+            </label>`
+        ).join('');
+    });
+    // Load label hints
+    fetch('/api/labels?series=' + encodeURIComponent(series)).then(r=>r.json()).then(data=>{
+        document.getElementById('termHints').innerHTML = data.labels.slice(0, 40).map(l =>
+            `<span class="pill" onclick="addTerm('${l.label}')">${l.label} <span style="opacity:0.5">(${l.count})</span></span>`
+        ).join('');
+    });
+    // Load theme hints
+    fetch('/api/themes').then(r=>r.json()).then(data=>{
+        document.getElementById('themeHints').innerHTML = data.themes.map(t =>
+            `<span class="pill" style="background:#2a1a3a;color:#cc5de8;" onclick="addTerm('${t.name}')">${t.name} <span style="opacity:0.5">(theme)</span></span>`
+        ).join('');
+    });
+}
+
+function addTerm(term) {
+    const input = document.getElementById('chartTerms');
+    const current = input.value.trim();
+    if (current) {
+        // Don't add if already present
+        const existing = current.split(',').map(t=>t.trim().toLowerCase());
+        if (existing.includes(term.toLowerCase())) return;
+        input.value = current + ', ' + term;
+    } else {
+        input.value = term;
+    }
+}
+
+function selectAllEps(checked) {
+    document.querySelectorAll('.ep-check').forEach(cb => cb.checked = checked);
+}
+
+function getSelectedEpisodes() {
+    const checks = document.querySelectorAll('.ep-check:checked');
+    const all = document.querySelectorAll('.ep-check');
+    if (checks.length === all.length || checks.length === 0) return ''; // all selected = no filter
+    return Array.from(checks).map(cb => cb.value).join(',');
+}
+
+function buildChart() {
+    const series = document.getElementById('seriesSelect').value;
+    const terms = document.getElementById('chartTerms').value.trim();
+    const chartType = document.getElementById('chartType').value;
+    const yMetric = document.getElementById('yMetric').value;
+    const episodes = getSelectedEpisodes();
+
+    if (!series || !terms) { alert('Select a series and enter terms.'); return; }
+
+    let url = `/api/chart?series=${encodeURIComponent(series)}&terms=${encodeURIComponent(terms)}`;
+    if (episodes) url += `&episodes=${encodeURIComponent(episodes)}`;
+
+    fetch(url).then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+
+        document.getElementById('chartCard').style.display = '';
+
+        const ctx = document.getElementById('mainChart').getContext('2d');
+        if (mainChart) mainChart.destroy();
+
+        const isStacked = chartType === 'bar_stacked';
+        const type = chartType === 'bar_stacked' ? 'bar' : chartType;
+
+        const datasets = data.datasets.map((ds, i) => {
+            const color = COLORS[i % COLORS.length];
+            const base = {
+                label: ds.term,
+                data: ds.data,
+                borderColor: color,
+                backgroundColor: type === 'bar' ? color + '88' : color + '22',
+                borderWidth: type === 'line' ? 2 : 1,
+            };
+            if (type === 'line') {
+                base.tension = 0.3;
+                base.fill = true;
+                base.pointRadius = 4;
+                base.pointHoverRadius = 6;
+            }
+            return base;
+        });
+
+        const yLabel = {
+            'episode_share': 'Episode Share (%)',
+            'pixel_time': 'Pixel-Time (sec)',
+            'detection_count': 'Detection Count',
+        }[yMetric] || 'Episode Share (%)';
+
+        const config = {
+            type: type,
+            data: { labels: data.labels, datasets: datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { color: '#ccc', font: { size: 12 } } },
+                    tooltip: {
+                        callbacks: {
+                            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(4)}%`
+                        }
+                    }
+                },
+            },
+        };
+
+        if (type === 'radar') {
+            config.options.scales = {
+                r: {
+                    ticks: { color: '#888', backdropColor: 'transparent' },
+                    grid: { color: '#2a2a2a' },
+                    pointLabels: { color: '#ccc', font: { size: 11 } },
+                }
+            };
+        } else {
+            config.options.scales = {
+                x: {
+                    stacked: isStacked,
+                    ticks: { color: '#888', font: { size: 11 }, maxRotation: 45 },
+                    grid: { color: '#1a1a1a' },
+                },
+                y: {
+                    stacked: isStacked,
+                    title: { display: true, text: yLabel, color: '#888' },
+                    ticks: { color: '#888', callback: v => v.toFixed(3) + '%' },
+                    grid: { color: '#1a1a1a' },
+                    beginAtZero: true,
+                },
+            };
+        }
+
+        const termList = terms.split(',').map(t=>t.trim()).join(', ');
+        document.getElementById('chartTitle').textContent = `${type.charAt(0).toUpperCase() + type.slice(1)} Chart — ${termList}`;
+
+        mainChart = new Chart(ctx, config);
+
+        // Build pivot table
+        buildPivotTable(data);
+    });
+}
+
+function buildPivotTable(data) {
+    document.getElementById('pivotCard').style.display = '';
+
+    const head = document.getElementById('pivotHead');
+    const body = document.getElementById('pivotBody');
+
+    let headerHtml = '<tr><th>Episode</th>';
+    data.datasets.forEach(ds => {
+        headerHtml += `<th style="text-align:right;">${ds.term}</th>`;
+    });
+    headerHtml += '</tr>';
+    head.innerHTML = headerHtml;
+
+    body.innerHTML = '';
+    data.labels.forEach((label, i) => {
+        let row = `<tr><td><strong>${label}</strong></td>`;
+        data.datasets.forEach(ds => {
+            const val = ds.data[i];
+            const bg = val > 0 ? `rgba(74,158,255,${Math.min(val * 10, 0.3)})` : 'transparent';
+            row += `<td style="text-align:right; background:${bg};">${val.toFixed(4)}%</td>`;
+        });
+        row += '</tr>';
+        body.innerHTML += row;
+    });
+}
+
+// Quick Compare
+function buildCompare() {
+    const series = document.getElementById('seriesSelect').value;
+    const a = document.getElementById('compareA').value.trim();
+    const b = document.getElementById('compareB').value.trim();
+    if (!series || !a || !b) { alert('Enter both terms and select a series.'); return; }
+
+    const episodes = getSelectedEpisodes();
+    let url = `/api/chart?series=${encodeURIComponent(series)}&terms=${encodeURIComponent(a + ',' + b)}`;
+    if (episodes) url += `&episodes=${encodeURIComponent(episodes)}`;
+
+    fetch(url).then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+
+        const ctx = document.getElementById('compareChart').getContext('2d');
+        if (compareChartObj) compareChartObj.destroy();
+
+        compareChartObj = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: data.labels,
+                datasets: data.datasets.map((ds, i) => ({
+                    label: ds.term,
+                    data: ds.data,
+                    backgroundColor: COLORS[i] + '88',
+                    borderColor: COLORS[i],
+                    borderWidth: 1,
+                })),
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { color: '#ccc' } },
+                    tooltip: {
+                        callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(4)}%` }
+                    }
+                },
+                scales: {
+                    x: {
+                        ticks: { color: '#888', maxRotation: 45 },
+                        grid: { color: '#1a1a1a' },
+                    },
+                    y: {
+                        title: { display: true, text: 'Episode Share (%)', color: '#888' },
+                        ticks: { color: '#888', callback: v => v.toFixed(3) + '%' },
+                        grid: { color: '#1a1a1a' },
+                        beginAtZero: true,
+                    },
+                },
+            },
+        });
+    });
+}
+
+// Enter key triggers build
+document.getElementById('chartTerms').addEventListener('keydown', e=>{
+    if (e.key === 'Enter') buildChart();
+});
+</script>
+{% endblock %}

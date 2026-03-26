@@ -9,7 +9,7 @@
     <div class="row">
         <div class="form-group">
             <label>Series</label>
-            <select id="seriesSelect">
+            <select id="seriesSelect" onchange="loadFrameInfo()">
                 <option value="">Loading...</option>
             </select>
         </div>
@@ -26,11 +26,19 @@
         <div class="form-group">
             <label>Batch Size</label>
             <select id="batchSize">
+                <option value="4">4 (safe)</option>
                 <option value="8">8</option>
                 <option value="16" selected>16</option>
                 <option value="32">32</option>
             </select>
         </div>
+    </div>
+    <div id="frameInfo" style="font-size:13px; color:#888; margin:12px 0;"></div>
+    <div style="margin-top:8px; display:flex; align-items:center; gap:16px;">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; text-transform:none; letter-spacing:normal; font-size:14px; color:#ccc; margin:0;">
+            <input type="checkbox" id="forceRedetect" style="cursor:pointer;" />
+            Force re-detect (clears existing detections and re-runs)
+        </label>
     </div>
     <div style="margin-top:16px;">
         <button class="btn" id="startBtn" onclick="startDetection()">Start Detection</button>
@@ -43,11 +51,6 @@
     <div id="progressText" style="font-size:13px; color:#888; margin-bottom:8px;"></div>
     <div class="log" id="logOutput"></div>
 </div>
-
-<div class="card" id="runningJobs" style="display:none;">
-    <h2>Recent Jobs</h2>
-    <div id="jobsList"></div>
-</div>
 {% endblock %}
 
 {% block scripts %}
@@ -55,7 +58,7 @@
 // Load series list
 fetch('/api/series').then(r=>r.json()).then(data=>{
     const sel = document.getElementById('seriesSelect');
-    sel.innerHTML = '';
+    sel.innerHTML = '<option value="">Select series</option>';
     if (!data.series.length) {
         sel.innerHTML = '<option value="">No series found — add videos first</option>';
         return;
@@ -64,6 +67,19 @@ fetch('/api/series').then(r=>r.json()).then(data=>{
         sel.innerHTML += `<option value="${s.name}">${s.name}</option>`;
     });
 });
+
+function loadFrameInfo() {
+    const series = document.getElementById('seriesSelect').value;
+    if (!series) { document.getElementById('frameInfo').textContent = ''; return; }
+
+    fetch('/api/status').then(r=>r.json()).then(data=>{
+        const s = data.series.find(x => x.name === series);
+        if (s) {
+            document.getElementById('frameInfo').textContent =
+                `${s.total_episodes} episodes, ${s.total_frames.toLocaleString()} frames, ${s.total_detections.toLocaleString()} existing detections`;
+        }
+    });
+}
 
 function log(msg, cls) {
     const el = document.getElementById('logOutput');
@@ -78,9 +94,14 @@ function startDetection() {
     const series = document.getElementById('seriesSelect').value;
     const detectors = document.getElementById('detectors').value;
     const batchSize = document.getElementById('batchSize').value;
+    const force = document.getElementById('forceRedetect').checked;
 
     if (!series) {
         alert('Please select a series.');
+        return;
+    }
+
+    if (force && !confirm('This will delete existing detections for the selected detectors and re-run. Continue?')) {
         return;
     }
 
@@ -88,12 +109,13 @@ function startDetection() {
     document.getElementById('progressCard').classList.remove('hidden');
     document.getElementById('logOutput').innerHTML = '';
     document.getElementById('progressFill').style.width = '0%';
+    document.getElementById('progressText').textContent = '';
     log('Starting detection...', 'info');
 
     fetch('/api/detect', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({series, detectors, batch_size: parseInt(batchSize)}),
+        body: JSON.stringify({series, detectors, batch_size: parseInt(batchSize), force}),
     })
     .then(r => r.json())
     .then(data => {
@@ -121,6 +143,7 @@ function startDetection() {
             document.getElementById('progressFill').style.width = '100%';
             document.getElementById('startBtn').disabled = false;
             evtSource.close();
+            loadFrameInfo();
         });
 
         evtSource.addEventListener('error', e => {
