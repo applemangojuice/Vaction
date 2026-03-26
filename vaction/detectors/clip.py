@@ -75,15 +75,25 @@ class CLIPDetector:
         threshold: float = 0.2,
         scene_prompts: list[str] | None = None,
         attribute_prompts: list[str] | None = None,
+        custom_prompts: list[dict] | None = None,
     ):
         import open_clip
         import torch
 
         self.device = device
         self.threshold = threshold
-        self.prompts = (scene_prompts or DEFAULT_SCENE_PROMPTS) + (
-            attribute_prompts or DEFAULT_ATTRIBUTE_PROMPTS
-        )
+
+        # If custom_prompts provided (from DB), use those instead of defaults
+        if custom_prompts:
+            self.prompts = [p["prompt"] for p in custom_prompts]
+            # Build label map from custom prompts
+            for p in custom_prompts:
+                if p["prompt"] not in PROMPT_LABELS:
+                    PROMPT_LABELS[p["prompt"]] = p["label"]
+        else:
+            self.prompts = (scene_prompts or DEFAULT_SCENE_PROMPTS) + (
+                attribute_prompts or DEFAULT_ATTRIBUTE_PROMPTS
+            )
 
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             model_name, pretrained=pretrained

@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %}Vocabulary — Vaction{% endblock %}
+{% block content %}
+<h1>Detection Vocabulary</h1>
+<p class="subtitle">Configure what CLIP searches for in each frame. Add custom prompts, enable/disable existing ones.</p>
+
+<div class="card">
+    <h2>Add New Prompt</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">
+        A prompt describes what to look for (e.g. "a red car"), and the label is the short searchable tag (e.g. "red_car").
+    </p>
+    <div class="row">
+        <div class="form-group" style="flex:2;">
+            <label>Prompt (what CLIP sees)</label>
+            <input type="text" id="newPrompt" placeholder='e.g. "a person running", "weapons or guns", "an outdoor garden"' />
+        </div>
+        <div class="form-group">
+            <label>Label (search tag)</label>
+            <input type="text" id="newLabel" placeholder='e.g. running, weapon, garden' />
+        </div>
+        <div class="form-group">
+            <label>Category</label>
+            <select id="newCategory">
+                <option value="scene">Scene</option>
+                <option value="attribute">Attribute</option>
+                <option value="object">Object</option>
+                <option value="action">Action</option>
+                <option value="custom">Custom</option>
+            </select>
+        </div>
+        <div class="form-group" style="flex:0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="btn" onclick="addPrompt()">Add</button>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Quick Add — Common Objects</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">Click to add common prompts that YOLO may miss or that need CLIP-level detection.</p>
+    <div class="pill-row" id="quickAddPills"></div>
+</div>
+
+<div class="card">
+    <h2>Current Vocabulary</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">
+        These prompts are used when running CLIP detection. Toggle off to exclude without deleting. Re-run detection after changes.
+    </p>
+    <div id="vocabList">Loading...</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const QUICK_ADD = [
+    {prompt: "a weapon or firearm", label: "weapon", cat: "object"},
+    {prompt: "a phone or smartphone", label: "phone", cat: "object"},
+    {prompt: "a computer screen or monitor", label: "screen", cat: "object"},
+    {prompt: "a badge or ID card", label: "badge", cat: "object"},
+    {prompt: "a door", label: "door", cat: "object"},
+    {prompt: "a window", label: "window", cat: "object"},
+    {prompt: "stairs or steps", label: "stairs", cat: "object"},
+    {prompt: "signage or signs", label: "signage", cat: "object"},
+    {prompt: "food or a meal", label: "food", cat: "object"},
+    {prompt: "a drink or beverage", label: "drink", cat: "object"},
+    {prompt: "a book or document", label: "book", cat: "object"},
+    {prompt: "a vehicle or car", label: "vehicle", cat: "object"},
+    {prompt: "a person running", label: "running", cat: "action"},
+    {prompt: "people fighting or in conflict", label: "fighting", cat: "action"},
+    {prompt: "people hugging or embracing", label: "hugging", cat: "action"},
+    {prompt: "a person crying", label: "crying", cat: "action"},
+    {prompt: "a nighttime or dark outdoor scene", label: "nighttime", cat: "scene"},
+    {prompt: "a hospital or medical room", label: "hospital", cat: "scene"},
+    {prompt: "a restaurant or bar", label: "restaurant", cat: "scene"},
+    {prompt: "a forest or woods", label: "forest", cat: "scene"},
+    {prompt: "a beach or waterfront", label: "beach", cat: "scene"},
+    {prompt: "an urban city street", label: "city_street", cat: "scene"},
+    {prompt: "a scene with green objects", label: "green", cat: "attribute"},
+    {prompt: "a scene with white or sterile aesthetic", label: "white_sterile", cat: "attribute"},
+    {prompt: "blood or injury", label: "blood", cat: "attribute"},
+];
+
+function loadVocab() {
+    fetch('/api/vocabulary').then(r=>r.json()).then(data=>{
+        const el = document.getElementById('vocabList');
+        if (!data.prompts.length) {
+            el.innerHTML = '<p style="color:#666;">No prompts configured. Add some above or they will be auto-seeded on first detection run.</p>';
+            return;
+        }
+
+        // Group by category
+        const groups = {};
+        data.prompts.forEach(p => {
+            if (!groups[p.category]) groups[p.category] = [];
+            groups[p.category].push(p);
+        });
+
+        let html = '';
+        for (const [cat, prompts] of Object.entries(groups)) {
+            html += `<h3 style="color:#888; font-size:13px; text-transform:uppercase; letter-spacing:0.5px; margin:16px 0 8px;">${cat}</h3>`;
+            html += '<table><thead><tr><th>Prompt</th><th>Label</th><th style="text-align:center;">Enabled</th><th></th></tr></thead><tbody>';
+            prompts.forEach(p => {
+                const checked = p.enabled ? 'checked' : '';
+                const opacity = p.enabled ? '1' : '0.4';
+                html += `<tr style="opacity:${opacity};">
+                    <td style="font-size:13px;">${p.prompt}</td>
+                    <td><span class="tag">${p.label}</span></td>
+                    <td style="text-align:center;">
+                        <input type="checkbox" ${checked} onchange="togglePrompt(${p.id}, this.checked)" style="cursor:pointer;" />
+                    </td>
+                    <td style="text-align:right;">
+                        <button class="btn btn-secondary" style="padding:2px 8px; font-size:11px;" onclick="deletePrompt(${p.id})">Remove</button>
+                    </td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        }
+        el.innerHTML = html;
+    });
+}
+
+function addPrompt() {
+    const prompt = document.getElementById('newPrompt').value.trim();
+    const label = document.getElementById('newLabel').value.trim();
+    const category = document.getElementById('newCategory').value;
+    if (!prompt || !label) { alert('Enter both prompt and label.'); return; }
+
+    fetch('/api/vocabulary', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt, label, category}),
+    }).then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('newPrompt').value = '';
+        document.getElementById('newLabel').value = '';
+        loadVocab();
+    });
+}
+
+function togglePrompt(id, enabled) {
+    fetch(`/api/vocabulary/${id}/toggle`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled}),
+    }).then(() => loadVocab());
+}
+
+function deletePrompt(id) {
+    if (!confirm('Remove this prompt?')) return;
+    fetch(`/api/vocabulary/${id}`, {method: 'DELETE'}).then(() => loadVocab());
+}
+
+function quickAdd(prompt, label, cat) {
+    fetch('/api/vocabulary', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt, label, category: cat}),
+    }).then(r=>r.json()).then(() => loadVocab());
+}
+
+// Build quick add pills
+const qel = document.getElementById('quickAddPills');
+QUICK_ADD.forEach(q => {
+    qel.innerHTML += `<span class="pill" onclick="quickAdd('${q.prompt}','${q.label}','${q.cat}')">${q.label}</span>`;
+});
+
+loadVocab();
+</script>
+{% endblock %}

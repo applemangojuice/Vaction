@@ -5,16 +5,55 @@
 <p class="subtitle">Import episode files from a local folder and extract frames for analysis</p>
 
 <div class="card">
-    <h2>Step 1: Select Folder & Settings</h2>
+    <h2>Step 1: Select Folder</h2>
     <div class="form-group">
         <label>Folder Path</label>
-        <input type="text" id="folderPath" placeholder="e.g. ~/Videos/Severance/Season 1" />
+        <div class="row">
+            <div class="form-group" style="flex:1;">
+                <input type="text" id="folderPath" placeholder="e.g. ~/Videos/Severance/Season 1" />
+            </div>
+            <div class="form-group" style="flex:0 0 auto;">
+                <button class="btn btn-secondary" onclick="openBrowser()">Browse...</button>
+            </div>
+        </div>
     </div>
+
+    <!-- File browser modal -->
+    <div id="browserModal" class="hidden" style="background:#0e0e0e; border:1px solid #333; border-radius:8px; padding:16px; margin-bottom:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <div style="font-size:13px; color:#888;" id="browserPath">/</div>
+            <button class="btn btn-secondary" style="padding:4px 12px; font-size:12px;" onclick="browserUp()">Up</button>
+        </div>
+        <div id="browserEntries" style="max-height:250px; overflow-y:auto;"></div>
+        <div style="margin-top:12px; display:flex; gap:8px;">
+            <button class="btn" onclick="selectCurrentFolder()">Select This Folder</button>
+            <button class="btn btn-secondary" onclick="closeBrowser()">Cancel</button>
+        </div>
+    </div>
+
+    <h2 style="margin-top:20px;">Step 2: Series</h2>
     <div class="row">
         <div class="form-group">
-            <label>Series Name</label>
-            <input type="text" id="seriesName" placeholder="e.g. Severance" />
+            <label>Add to</label>
+            <select id="seriesMode" onchange="toggleSeriesInput()">
+                <option value="new">New Series</option>
+                <option value="existing">Existing Series</option>
+            </select>
         </div>
+        <div class="form-group" id="newSeriesGroup">
+            <label>New Series Name</label>
+            <input type="text" id="newSeriesName" placeholder="e.g. Severance" />
+        </div>
+        <div class="form-group hidden" id="existingSeriesGroup">
+            <label>Existing Series</label>
+            <select id="existingSeriesSelect">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+    </div>
+
+    <h2 style="margin-top:20px;">Step 3: Settings</h2>
+    <div class="row">
         <div class="form-group">
             <label>Frame Rate (fps)</label>
             <select id="fps">
@@ -40,7 +79,7 @@
 </div>
 
 <div class="card hidden" id="progressCard">
-    <h2>Step 2: Processing</h2>
+    <h2>Processing</h2>
     <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
     <div class="log" id="logOutput"></div>
 </div>
@@ -48,6 +87,86 @@
 
 {% block scripts %}
 <script>
+let currentBrowserPath = '';
+
+// Load existing series
+fetch('/api/series').then(r=>r.json()).then(data=>{
+    const sel = document.getElementById('existingSeriesSelect');
+    sel.innerHTML = '';
+    if (!data.series.length) {
+        sel.innerHTML = '<option value="">No series yet</option>';
+        return;
+    }
+    data.series.forEach(s=>{
+        sel.innerHTML += `<option value="${s.name}">${s.name}</option>`;
+    });
+});
+
+function toggleSeriesInput() {
+    const mode = document.getElementById('seriesMode').value;
+    document.getElementById('newSeriesGroup').classList.toggle('hidden', mode !== 'new');
+    document.getElementById('existingSeriesGroup').classList.toggle('hidden', mode !== 'existing');
+}
+
+function getSeriesName() {
+    const mode = document.getElementById('seriesMode').value;
+    if (mode === 'new') return document.getElementById('newSeriesName').value.trim();
+    return document.getElementById('existingSeriesSelect').value;
+}
+
+// File browser
+function openBrowser() {
+    const current = document.getElementById('folderPath').value.trim() || '~';
+    document.getElementById('browserModal').classList.remove('hidden');
+    browseTo(current);
+}
+
+function closeBrowser() {
+    document.getElementById('browserModal').classList.add('hidden');
+}
+
+function browseTo(path) {
+    fetch('/api/browse?path=' + encodeURIComponent(path))
+    .then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+        currentBrowserPath = data.path;
+        document.getElementById('browserPath').textContent = data.path;
+
+        const el = document.getElementById('browserEntries');
+        el.innerHTML = '';
+        data.entries.filter(e => e.is_dir).forEach(entry => {
+            const div = document.createElement('div');
+            div.style.cssText = 'padding:6px 10px; cursor:pointer; border-radius:4px; font-size:13px;';
+            div.textContent = entry.name + '/';
+            div.onmouseover = () => div.style.background = '#1a1a1a';
+            div.onmouseout = () => div.style.background = 'transparent';
+            div.onclick = () => browseTo(entry.path);
+            el.appendChild(div);
+        });
+        // Also show video files
+        data.entries.filter(e => !e.is_dir && /\.(mp4|mkv|avi|mov|m4v|ts|webm)$/i.test(e.name)).forEach(entry => {
+            const div = document.createElement('div');
+            div.style.cssText = 'padding:6px 10px; font-size:13px; color:#666;';
+            const size = entry.size ? (entry.size / 1024 / 1024).toFixed(0) + ' MB' : '';
+            div.textContent = entry.name + (size ? '  (' + size + ')' : '');
+            el.appendChild(div);
+        });
+    });
+}
+
+function browserUp() {
+    fetch('/api/browse?path=' + encodeURIComponent(currentBrowserPath))
+    .then(r=>r.json()).then(data=>{
+        if (data.parent) browseTo(data.parent);
+    });
+}
+
+function selectCurrentFolder() {
+    document.getElementById('folderPath').value = currentBrowserPath;
+    closeBrowser();
+}
+
+// Ingest
 function log(msg, cls) {
     const el = document.getElementById('logOutput');
     const line = document.createElement('div');
@@ -59,7 +178,7 @@ function log(msg, cls) {
 
 function startIngest() {
     const path = document.getElementById('folderPath').value.trim();
-    const series = document.getElementById('seriesName').value.trim();
+    const series = getSeriesName();
     const fps = document.getElementById('fps').value;
     const transcode = document.getElementById('transcode').value || null;
 
@@ -86,16 +205,11 @@ function startIngest() {
             return;
         }
         const evtSource = new EventSource('/api/jobs/' + data.job_id + '/stream');
-
-        evtSource.addEventListener('status', e => {
-            log(e.data, 'info');
-        });
-
+        evtSource.addEventListener('status', e => log(e.data, 'info'));
         evtSource.addEventListener('progress', e => {
             const d = JSON.parse(e.data);
             log(`Episode ${d.episode}: ${d.frames} frames extracted`);
         });
-
         evtSource.addEventListener('complete', e => {
             const d = JSON.parse(e.data);
             log(`\nDone! ${d.episodes} episodes, ${d.total_frames.toLocaleString()} total frames.`, 'info');
@@ -103,7 +217,6 @@ function startIngest() {
             document.getElementById('startBtn').disabled = false;
             evtSource.close();
         });
-
         evtSource.addEventListener('error', e => {
             if (e.data) log('Error: ' + e.data, 'error');
             document.getElementById('startBtn').disabled = false;

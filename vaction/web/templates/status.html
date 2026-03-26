@@ -2,7 +2,18 @@
 {% block title %}Status — Vaction{% endblock %}
 {% block content %}
 <h1>Status</h1>
-<p class="subtitle">Overview of all indexed content</p>
+<p class="subtitle">Overview of all indexed content and data storage</p>
+
+<!-- Data Persistence -->
+<div class="card">
+    <h2>Data Storage</h2>
+    <div id="dataInfo" style="color:#666;">Loading...</div>
+    <div style="margin-top:12px; display:flex; gap:8px;">
+        <button class="btn btn-secondary" onclick="createBackup()">Create Backup</button>
+    </div>
+    <div id="backupResult" style="margin-top:8px;"></div>
+    <div id="backupsList" style="margin-top:12px;"></div>
+</div>
 
 <div id="statusContent">
     <div class="card"><p style="color:#666;">Loading...</p></div>
@@ -11,6 +22,49 @@
 
 {% block scripts %}
 <script>
+// Data info
+fetch('/api/data-info').then(r=>r.json()).then(data=>{
+    document.getElementById('dataInfo').innerHTML = `
+        <div class="grid-2" style="margin-bottom:8px;">
+            <div><div class="stat-value" style="font-size:20px;">${data.db_size_mb} MB</div><div class="stat-label">Database</div></div>
+            <div><div class="stat-value" style="font-size:20px;">${data.frames_size_mb} MB</div><div class="stat-label">Frames</div></div>
+        </div>
+        <p style="font-size:13px; color:#666; margin-top:8px;">
+            <strong>Database:</strong> ${data.db_path}<br>
+            <strong>Frames:</strong> ${data.frames_dir}<br>
+            <strong>Data directory:</strong> ${data.data_dir}<br>
+            <br>
+            Your data persists across code updates. The database and frames are stored in <code style="background:#1a1a1a; padding:2px 6px; border-radius:3px;">~/.vaction/</code>,
+            separate from the git repository. Updating the code (git pull) will not affect your indexed data.
+        </p>
+    `;
+});
+
+// Backups
+function loadBackups() {
+    fetch('/api/backups').then(r=>r.json()).then(data=>{
+        const el = document.getElementById('backupsList');
+        if (!data.backups.length) { el.innerHTML = ''; return; }
+        let html = '<p style="font-size:12px; color:#666; margin-bottom:4px;">Previous backups:</p>';
+        data.backups.slice(0, 5).forEach(b => {
+            const date = new Date(b.modified * 1000).toLocaleString();
+            html += `<div style="font-size:12px; color:#888; padding:2px 0;">${b.name} (${b.size_mb} MB) — ${date}</div>`;
+        });
+        el.innerHTML = html;
+    });
+}
+
+function createBackup() {
+    fetch('/api/backup', {method:'POST'}).then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('backupResult').innerHTML =
+            `<span style="color:#51cf66; font-size:13px;">Backup created: ${data.backup_path} (${data.size_mb} MB)</span>`;
+        loadBackups();
+    });
+}
+loadBackups();
+
+// Series status
 fetch('/api/status').then(r=>r.json()).then(data=>{
     const el = document.getElementById('statusContent');
 

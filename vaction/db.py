@@ -84,12 +84,52 @@ CREATE TABLE IF NOT EXISTS alias (
     UNIQUE(term, label)
 );
 
+CREATE TABLE IF NOT EXISTS theme (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT
+);
+
+CREATE TABLE IF NOT EXISTS theme_tag (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    theme_id    INTEGER NOT NULL REFERENCES theme(id) ON DELETE CASCADE,
+    label       TEXT NOT NULL,
+    UNIQUE(theme_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS clip_prompt (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt      TEXT NOT NULL UNIQUE,
+    label       TEXT NOT NULL,
+    category    TEXT NOT NULL DEFAULT 'scene',
+    enabled     INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS face_cluster (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_id   INTEGER NOT NULL REFERENCES series(id),
+    name        TEXT,
+    thumbnail_frame_id INTEGER REFERENCES frame(id),
+    thumbnail_bbox TEXT
+);
+
+CREATE TABLE IF NOT EXISTS face_cluster_member (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id  INTEGER NOT NULL REFERENCES face_cluster(id) ON DELETE CASCADE,
+    detection_id INTEGER NOT NULL REFERENCES detection(id),
+    embedding   BLOB,
+    UNIQUE(cluster_id, detection_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_detection_label ON detection(label);
 CREATE INDEX IF NOT EXISTS idx_detection_frame ON detection(frame_id);
 CREATE INDEX IF NOT EXISTS idx_frame_episode ON frame(episode_id);
 CREATE INDEX IF NOT EXISTS idx_detection_label_confidence ON detection(label, confidence);
 CREATE INDEX IF NOT EXISTS idx_season_series ON season(series_id);
 CREATE INDEX IF NOT EXISTS idx_episode_season ON episode(season_id);
+CREATE INDEX IF NOT EXISTS idx_theme_tag_label ON theme_tag(label);
+CREATE INDEX IF NOT EXISTS idx_face_cluster_series ON face_cluster(series_id);
+CREATE INDEX IF NOT EXISTS idx_face_cluster_member_cluster ON face_cluster_member(cluster_id);
 """
 
 
@@ -234,3 +274,84 @@ def get_aliases(conn: sqlite3.Connection, term: str) -> list[str]:
 def update_episode_frame_count(conn: sqlite3.Connection, episode_id: int, count: int) -> None:
     conn.execute("UPDATE episode SET num_frames = ? WHERE id = ?", (count, episode_id))
     conn.commit()
+
+
+# --- Theme helpers ---
+
+def create_theme(conn: sqlite3.Connection, name: str, description: str, labels: list[str]) -> int:
+    cur = conn.execute("INSERT INTO theme (name, description) VALUES (?, ?)", (name, description))
+    theme_id = cur.lastrowid
+    for label in labels:
+        conn.execute("INSERT OR IGNORE INTO theme_tag (theme_id, label) VALUES (?, ?)", (theme_id, label.lower()))
+    conn.commit()
+    return theme_id
+
+
+def update_theme(conn: sqlite3.Connection, theme_id: int, name: str, description: str, labels: list[str]) -> None:
+    conn.execute("UPDATE theme SET name = ?, description = ? WHERE id = ?", (name, description, theme_id))
+    conn.execute("DELETE FROM theme_tag WHERE theme_id = ?", (theme_id,))
+    for label in labels:
+        conn.execute("INSERT OR IGNORE INTO theme_tag (theme_id, label) VALUES (?, ?)", (theme_id, label.lower()))
+    conn.commit()
+
+
+def delete_theme(conn: sqlite3.Connection, theme_id: int) -> None:
+    conn.execute("DELETE FROM theme WHERE id = ?", (theme_id,))
+    conn.commit()
+
+
+def get_all_themes(conn: sqlite3.Connection) -> list[dict]:
+    themes = conn.execute("SELECT * FROM theme ORDER BY name").fetchall()
+    result = []
+    for t in themes:
+        tags = conn.execute("SELECT label FROM theme_tag WHERE theme_id = ?", (t["id"],)).fetchall()
+        result.append({"id": t["id"], "name": t["name"], "description": t["description"] or "", "labels": [r["label"] for r in tags]})
+    return result
+
+
+def get_theme_labels(conn: sqlite3.Connection, theme_name: str) -> list[str]:
+    row = conn.execute("SELECT id FROM theme WHERE name = ?", (theme_name,)).fetchone()
+    if not row:
+        return []
+    tags = conn.execute("SELECT label FROM theme_tag WHERE theme_id = ?", (row["id"],)).fetchall()
+    return [r["label"] for r in tags]
+
+
+# --- CLIP prompt helpers ---
+
+def get_clip_prompts(conn: sqlite3.Connection, enabled_only: bool = True) -> list[dict]:
+    if enabled_only:
+        rows = conn.execute("SELECT * FROM clip_prompt WHERE enabled = 1 ORDER BY category, label").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM clip_prompt ORDER BY category, label").fetchall()
+    return [{"id": r["id"], "prompt": r["prompt"], "label": r["label"], "category": r["category"], "enabled": bool(r["enabled"])} for r in rows]
+
+
+def add_clip_prompt(conn: sqlite3.Connection, prompt: str, label: str, category: str = "scene") -> int:
+    cur = conn.execute("INSERT OR IGNORE INTO clip_prompt (prompt, label, category) VALUES (?, ?, ?)", (prompt, label.lower(), category))
+    conn.commit()
+    return cur.lastrowid
+
+
+def delete_clip_prompt(conn: sqlite3.Connection, prompt_id: int) -> None:
+    conn.execute("DELETE FROM clip_prompt WHERE id = ?", (prompt_id,))
+    conn.commit()
+
+
+def toggle_clip_prompt(conn: sqlite3.Connection, prompt_id: int, enabled: bool) -> None:
+    conn.execute("UPDATE clip_prompt SET enabled = ? WHERE id = ?", (1 if enabled else 0, prompt_id))
+    conn.commit()
+
+
+def seed_default_clip_prompts(conn: sqlite3.Connection) -> None:
+    """Insert default CLIP prompts if the table is empty."""
+    count = conn.execute("SELECT COUNT(*) as c FROM clip_prompt").fetchone()["c"]
+    if count > 0:
+        return
+    from vaction.detectors.clip import DEFAULT_SCENE_PROMPTS, DEFAULT_ATTRIBUTE_PROMPTS, PROMPT_LABELS
+    for prompt in DEFAULT_SCENE_PROMPTS:
+        label = PROMPT_LABELS.get(prompt, prompt.lower().replace(" ", "_"))
+        add_clip_prompt(conn, prompt, label, "scene")
+    for prompt in DEFAULT_ATTRIBUTE_PROMPTS:
+        label = PROMPT_LABELS.get(prompt, prompt.lower().replace(" ", "_"))
+        add_clip_prompt(conn, prompt, label, "attribute")

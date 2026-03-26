@@ -14,7 +14,12 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, render_template, request
 
 from vaction.config import VactionConfig, get_config
-from vaction.db import db_session, get_aliases, get_connection, init_db, insert_alias
+from vaction.db import (
+    db_session, get_aliases, get_connection, init_db, insert_alias,
+    create_theme, update_theme, delete_theme, get_all_themes, get_theme_labels,
+    get_clip_prompts, add_clip_prompt, delete_clip_prompt, toggle_clip_prompt,
+    seed_default_clip_prompts,
+)
 
 app = Flask(
     __name__,
@@ -67,6 +72,21 @@ def search_page():
 @app.route("/status")
 def status_page():
     return render_template("status.html")
+
+
+@app.route("/vocabulary")
+def vocabulary_page():
+    return render_template("vocabulary.html")
+
+
+@app.route("/themes")
+def themes_page():
+    return render_template("themes.html")
+
+
+@app.route("/faces")
+def faces_page():
+    return render_template("faces.html")
 
 
 # ── API: Status ──────────────────────────────────────────────────────────────
@@ -236,7 +256,13 @@ def api_detect():
                         registry.register(YOLODetector(model_name=config.yolo_model, device=dev, confidence=config.confidence_threshold))
                     elif name == "clip":
                         from vaction.detectors.clip import CLIPDetector
-                        registry.register(CLIPDetector(model_name=config.clip_model, pretrained=config.clip_pretrained, device=dev))
+                        # Load custom prompts from database
+                        seed_default_clip_prompts(conn)
+                        custom_prompts = get_clip_prompts(conn, enabled_only=True)
+                        registry.register(CLIPDetector(
+                            model_name=config.clip_model, pretrained=config.clip_pretrained,
+                            device=dev, custom_prompts=custom_prompts if custom_prompts else None,
+                        ))
                     elif name == "face":
                         from vaction.detectors.faces import FaceDetector
                         det = FaceDetector(device=dev, distance_threshold=config.face_distance_threshold)
@@ -345,7 +371,9 @@ def api_search():
             return jsonify({"error": f"Series '{series_name}' not found"}), 404
 
         from vaction.metrics import compute_episode_metrics
-        results = compute_episode_metrics(conn, query_str, confidence, series_id=row["id"])
+        # Expand theme names into OR queries
+        query_expanded = _expand_themes(conn, query_str)
+        results = compute_episode_metrics(conn, query_expanded, confidence, series_id=row["id"])
 
         from vaction.metrics import format_timestamp
         output = []
@@ -460,7 +488,8 @@ def api_chart():
         datasets = []
 
         for term in term_list:
-            results = compute_episode_metrics(conn, term, confidence, series_id=row["id"])
+            expanded_term = _expand_themes(conn, term)
+            results = compute_episode_metrics(conn, expanded_term, confidence, series_id=row["id"])
             # Build a map of episode -> share
             ep_map = {}
             for r in results:
@@ -473,6 +502,506 @@ def api_chart():
         return jsonify({"labels": ep_labels, "datasets": datasets})
     finally:
         conn.close()
+
+
+def _expand_themes(conn, query_str: str) -> str:
+    """If a query term matches a theme name, expand it to (tag1 OR tag2 OR ...)."""
+    themes = get_all_themes(conn)
+    theme_map = {t["name"].lower(): t["labels"] for t in themes}
+
+    # Simple token-level replacement
+    import re
+    tokens = re.findall(r'"[^"]*"|\(|\)|AND|OR|NOT|[^\s()]+', query_str, re.IGNORECASE)
+    result = []
+    for token in tokens:
+        lower = token.lower()
+        if lower in theme_map and lower not in ("and", "or", "not"):
+            labels = theme_map[lower]
+            if labels:
+                expanded = " OR ".join(labels)
+                result.append(f"({expanded})")
+            else:
+                result.append(token)
+        else:
+            result.append(token)
+    return " ".join(result)
+
+
+# ── API: File browser ────────────────────────────────────────────────────────
+
+
+@app.route("/api/browse")
+def api_browse():
+    """Browse local filesystem directories."""
+    path = request.args.get("path", "").strip()
+    if not path:
+        path = str(Path.home())
+
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        return jsonify({"error": f"Path does not exist: {p}", "path": str(p)}), 404
+
+    if p.is_file():
+        p = p.parent
+
+    entries = []
+    try:
+        for item in sorted(p.iterdir()):
+            if item.name.startswith("."):
+                continue
+            entries.append({
+                "name": item.name,
+                "path": str(item),
+                "is_dir": item.is_dir(),
+                "size": item.stat().st_size if item.is_file() else None,
+            })
+    except PermissionError:
+        return jsonify({"error": "Permission denied", "path": str(p)}), 403
+
+    parent = str(p.parent) if p != p.parent else None
+    return jsonify({"path": str(p), "parent": parent, "entries": entries})
+
+
+# ── API: Vocabulary (CLIP prompts) ──────────────────────────────────────────
+
+
+@app.route("/api/vocabulary")
+def api_vocabulary():
+    conn = get_db()
+    try:
+        seed_default_clip_prompts(conn)
+        prompts = get_clip_prompts(conn, enabled_only=False)
+        return jsonify({"prompts": prompts})
+    finally:
+        conn.close()
+
+
+@app.route("/api/vocabulary", methods=["POST"])
+def api_vocabulary_add():
+    data = request.json
+    prompt = data.get("prompt", "").strip()
+    label = data.get("label", "").strip()
+    category = data.get("category", "scene").strip()
+    if not prompt or not label:
+        return jsonify({"error": "prompt and label are required"}), 400
+
+    conn = get_db()
+    try:
+        pid = add_clip_prompt(conn, prompt, label, category)
+        return jsonify({"ok": True, "id": pid})
+    finally:
+        conn.close()
+
+
+@app.route("/api/vocabulary/<int:prompt_id>", methods=["DELETE"])
+def api_vocabulary_delete(prompt_id):
+    conn = get_db()
+    try:
+        delete_clip_prompt(conn, prompt_id)
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.route("/api/vocabulary/<int:prompt_id>/toggle", methods=["POST"])
+def api_vocabulary_toggle(prompt_id):
+    data = request.json
+    enabled = data.get("enabled", True)
+    conn = get_db()
+    try:
+        toggle_clip_prompt(conn, prompt_id, enabled)
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+# ── API: Themes ─────────────────────────────────────────────────────────────
+
+
+@app.route("/api/themes")
+def api_themes():
+    conn = get_db()
+    try:
+        themes = get_all_themes(conn)
+        return jsonify({"themes": themes})
+    finally:
+        conn.close()
+
+
+@app.route("/api/themes", methods=["POST"])
+def api_themes_create():
+    data = request.json
+    name = data.get("name", "").strip()
+    description = data.get("description", "").strip()
+    labels = data.get("labels", [])
+    if not name or not labels:
+        return jsonify({"error": "name and labels are required"}), 400
+
+    conn = get_db()
+    try:
+        tid = create_theme(conn, name, description, labels)
+        return jsonify({"ok": True, "id": tid})
+    finally:
+        conn.close()
+
+
+@app.route("/api/themes/<int:theme_id>", methods=["PUT"])
+def api_themes_update(theme_id):
+    data = request.json
+    name = data.get("name", "").strip()
+    description = data.get("description", "").strip()
+    labels = data.get("labels", [])
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+
+    conn = get_db()
+    try:
+        update_theme(conn, theme_id, name, description, labels)
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.route("/api/themes/<int:theme_id>", methods=["DELETE"])
+def api_themes_delete(theme_id):
+    conn = get_db()
+    try:
+        delete_theme(conn, theme_id)
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+# ── API: Faces ──────────────────────────────────────────────────────────────
+
+
+@app.route("/api/faces")
+def api_faces():
+    """Get all face clusters for a series."""
+    series_name = request.args.get("series", "").strip()
+    conn = get_db()
+    try:
+        if not series_name:
+            return jsonify({"clusters": []})
+
+        row = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not row:
+            return jsonify({"clusters": []})
+
+        clusters = conn.execute("""
+            SELECT fc.id, fc.name, fc.thumbnail_frame_id, fc.thumbnail_bbox,
+                   COUNT(fcm.id) as member_count
+            FROM face_cluster fc
+            LEFT JOIN face_cluster_member fcm ON fcm.cluster_id = fc.id
+            WHERE fc.series_id = ?
+            GROUP BY fc.id
+            ORDER BY member_count DESC
+        """, (row["id"],)).fetchall()
+
+        result = []
+        for c in clusters:
+            result.append({
+                "id": c["id"],
+                "name": c["name"] or f"Face #{c['id']}",
+                "member_count": c["member_count"],
+                "thumbnail_frame_id": c["thumbnail_frame_id"],
+                "thumbnail_bbox": json.loads(c["thumbnail_bbox"]) if c["thumbnail_bbox"] else None,
+            })
+
+        return jsonify({"clusters": result})
+    finally:
+        conn.close()
+
+
+@app.route("/api/faces/scan", methods=["POST"])
+def api_faces_scan():
+    """Scan for faces, cluster them, and store in face_cluster tables."""
+    data = request.json
+    series_name = data.get("series", "").strip()
+    if not series_name:
+        return jsonify({"error": "series is required"}), 400
+
+    job_id = f"facescan_{int(time.time())}"
+    _job_queues[job_id] = queue.Queue()
+    _jobs[job_id] = {"type": "facescan", "status": "running", "series": series_name}
+
+    def run_facescan():
+        q = _job_queues[job_id]
+        try:
+            import numpy as np
+            config = get_app_config()
+            conn = init_db(config.db_path)
+            try:
+                row = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+                if not row:
+                    q.put({"event": "error", "data": f"Series '{series_name}' not found"})
+                    return
+                series_id = row["id"]
+
+                # Get all face detections
+                face_dets = conn.execute("""
+                    SELECT d.id as det_id, d.frame_id, d.bbox_x, d.bbox_y, d.bbox_w, d.bbox_h,
+                           d.confidence, f.file_path, e.width, e.height
+                    FROM detection d
+                    JOIN frame f ON d.frame_id = f.id
+                    JOIN episode e ON f.episode_id = e.id
+                    JOIN season s ON e.season_id = s.id
+                    WHERE s.series_id = ? AND d.detector = 'face'
+                      AND d.label != 'unknown_face'
+                      AND f.file_path IS NOT NULL
+                    ORDER BY d.confidence DESC
+                """, (series_id,)).fetchall()
+
+                if not face_dets:
+                    # Also check for yolo person detections we could crop faces from
+                    q.put({"event": "status", "data": "No face detections found. Run face detection first."})
+                    q.put({"event": "complete", "data": json.dumps({"clusters": 0})})
+                    return
+
+                q.put({"event": "status", "data": f"Found {len(face_dets)} face detections. Computing embeddings..."})
+
+                # Extract face embeddings using insightface
+                from vaction.detectors.faces import FaceDetector
+                detector = FaceDetector(device=config.device)
+                detector._ensure_model()
+
+                embeddings = []
+                det_ids = []
+                det_infos = []
+
+                for i, det in enumerate(face_dets):
+                    if not det["file_path"] or det["bbox_x"] is None:
+                        continue
+                    try:
+                        import cv2
+                        img = cv2.imread(det["file_path"])
+                        if img is None:
+                            continue
+                        faces = detector._app.get(img)
+                        # Find the face closest to our bbox
+                        best_face = None
+                        best_overlap = 0
+                        for face in faces:
+                            fx1, fy1, fx2, fy2 = face.bbox.astype(int)
+                            # Simple overlap check
+                            ox = max(0, min(fx2, det["bbox_x"] + det["bbox_w"]) - max(fx1, det["bbox_x"]))
+                            oy = max(0, min(fy2, det["bbox_y"] + det["bbox_h"]) - max(fy1, det["bbox_y"]))
+                            overlap = ox * oy
+                            if overlap > best_overlap and face.embedding is not None:
+                                best_overlap = overlap
+                                best_face = face
+
+                        if best_face is not None and best_face.embedding is not None:
+                            embeddings.append(best_face.embedding.astype(np.float32))
+                            det_ids.append(det["det_id"])
+                            det_infos.append(det)
+                    except Exception:
+                        continue
+
+                    if (i + 1) % 50 == 0:
+                        q.put({"event": "progress", "data": json.dumps({"processed": i + 1, "total": len(face_dets)})})
+
+                if not embeddings:
+                    q.put({"event": "complete", "data": json.dumps({"clusters": 0})})
+                    return
+
+                q.put({"event": "status", "data": f"Got {len(embeddings)} embeddings. Clustering..."})
+
+                # Simple agglomerative clustering by cosine similarity
+                emb_matrix = np.stack(embeddings)
+                norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+                emb_norm = emb_matrix / (norms + 1e-8)
+                sim_matrix = emb_norm @ emb_norm.T
+
+                threshold = 0.55  # cosine similarity threshold
+                assigned = [-1] * len(embeddings)
+                cluster_id_counter = 0
+
+                for i in range(len(embeddings)):
+                    if assigned[i] >= 0:
+                        continue
+                    assigned[i] = cluster_id_counter
+                    for j in range(i + 1, len(embeddings)):
+                        if assigned[j] >= 0:
+                            continue
+                        if sim_matrix[i, j] >= threshold:
+                            assigned[j] = cluster_id_counter
+                    cluster_id_counter += 1
+
+                # Clear existing clusters for this series
+                existing = conn.execute("SELECT id FROM face_cluster WHERE series_id = ?", (series_id,)).fetchall()
+                for ec in existing:
+                    conn.execute("DELETE FROM face_cluster_member WHERE cluster_id = ?", (ec["id"],))
+                    conn.execute("DELETE FROM face_cluster WHERE id = ?", (ec["id"],))
+
+                # Create clusters
+                cluster_map = {}
+                for idx, cid in enumerate(assigned):
+                    if cid not in cluster_map:
+                        # Use the first (highest confidence) face as thumbnail
+                        det = det_infos[idx]
+                        bbox_json = json.dumps({"x": det["bbox_x"], "y": det["bbox_y"], "w": det["bbox_w"], "h": det["bbox_h"]})
+                        cur = conn.execute(
+                            "INSERT INTO face_cluster (series_id, name, thumbnail_frame_id, thumbnail_bbox) VALUES (?, ?, ?, ?)",
+                            (series_id, None, det["frame_id"], bbox_json),
+                        )
+                        cluster_map[cid] = cur.lastrowid
+
+                    conn.execute(
+                        "INSERT OR IGNORE INTO face_cluster_member (cluster_id, detection_id, embedding) VALUES (?, ?, ?)",
+                        (cluster_map[cid], det_ids[idx], embeddings[idx].tobytes()),
+                    )
+
+                conn.commit()
+                q.put({"event": "complete", "data": json.dumps({"clusters": len(cluster_map), "faces": len(embeddings)})})
+            finally:
+                conn.close()
+        except Exception as e:
+            import traceback
+            q.put({"event": "error", "data": f"{e}\n{traceback.format_exc()}"})
+        finally:
+            _jobs[job_id]["status"] = "done"
+
+    threading.Thread(target=run_facescan, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/faces/<int:cluster_id>/name", methods=["POST"])
+def api_faces_rename(cluster_id):
+    data = request.json
+    name = data.get("name", "").strip()
+    conn = get_db()
+    try:
+        conn.execute("UPDATE face_cluster SET name = ? WHERE id = ?", (name, cluster_id))
+        conn.commit()
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.route("/api/faces/<int:cluster_id>/chart")
+def api_faces_chart(cluster_id):
+    """Get episode-level data for a face cluster, similar to search chart."""
+    series_name = request.args.get("series", "").strip()
+    conn = get_db()
+    try:
+        # Get detection IDs in this cluster
+        members = conn.execute(
+            "SELECT detection_id FROM face_cluster_member WHERE cluster_id = ?", (cluster_id,)
+        ).fetchall()
+        det_ids = [m["detection_id"] for m in members]
+
+        if not det_ids:
+            return jsonify({"labels": [], "data": []})
+
+        # Get episode-level aggregation
+        placeholders = ",".join("?" * len(det_ids))
+        rows = conn.execute(f"""
+            SELECT s.number as season_num, e.number as ep_num,
+                   SUM(d.pixel_area) as total_area,
+                   e.num_frames, e.width, e.height
+            FROM detection d
+            JOIN frame f ON d.frame_id = f.id
+            JOIN episode e ON f.episode_id = e.id
+            JOIN season s ON e.season_id = s.id
+            WHERE d.id IN ({placeholders})
+            GROUP BY e.id
+            ORDER BY s.number, e.number
+        """, det_ids).fetchall()
+
+        labels = []
+        data = []
+        for r in rows:
+            labels.append(f"S{r['season_num']:02d}E{r['ep_num']:02d}")
+            budget = r["num_frames"] * r["width"] * r["height"]
+            share = (r["total_area"] / budget * 100) if budget > 0 else 0
+            data.append(round(share, 4))
+
+        return jsonify({"labels": labels, "data": data})
+    finally:
+        conn.close()
+
+
+@app.route("/api/faces/frame/<int:frame_id>")
+def api_face_thumbnail(frame_id):
+    """Serve a cropped face image from a frame."""
+    bbox = request.args.get("bbox", "")
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT file_path FROM frame WHERE id = ?", (frame_id,)).fetchone()
+        if not row or not row["file_path"]:
+            return "Not found", 404
+
+        from PIL import Image
+        import io
+        img = Image.open(row["file_path"])
+
+        if bbox:
+            b = json.loads(bbox)
+            x, y, w, h = b.get("x", 0), b.get("y", 0), b.get("w", img.width), b.get("h", img.height)
+            # Add padding
+            pad = int(max(w, h) * 0.2)
+            x1 = max(0, x - pad)
+            y1 = max(0, y - pad)
+            x2 = min(img.width, x + w + pad)
+            y2 = min(img.height, y + h + pad)
+            img = img.crop((x1, y1, x2, y2))
+
+        img.thumbnail((150, 150))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        buf.seek(0)
+        return Response(buf.getvalue(), mimetype="image/jpeg")
+    finally:
+        conn.close()
+
+
+# ── API: Data persistence info ──────────────────────────────────────────────
+
+
+@app.route("/api/data-info")
+def api_data_info():
+    """Return info about the data directory and database."""
+    config = get_app_config()
+    db_path = config.db_path
+    frames_dir = config.frames_dir
+
+    db_size = db_path.stat().st_size if db_path.exists() else 0
+    frames_size = sum(f.stat().st_size for f in frames_dir.rglob("*") if f.is_file()) if frames_dir.exists() else 0
+
+    return jsonify({
+        "data_dir": str(config.data_dir),
+        "db_path": str(db_path),
+        "db_size_mb": round(db_size / 1024 / 1024, 2),
+        "frames_dir": str(frames_dir),
+        "frames_size_mb": round(frames_size / 1024 / 1024, 2),
+        "total_size_mb": round((db_size + frames_size) / 1024 / 1024, 2),
+    })
+
+
+@app.route("/api/backup", methods=["POST"])
+def api_backup():
+    """Create a backup of the database."""
+    import shutil
+    config = get_app_config()
+    db_path = config.db_path
+    if not db_path.exists():
+        return jsonify({"error": "No database to backup"}), 404
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    backup_path = config.data_dir / f"vaction_backup_{timestamp}.db"
+    shutil.copy2(str(db_path), str(backup_path))
+    return jsonify({"ok": True, "backup_path": str(backup_path), "size_mb": round(backup_path.stat().st_size / 1024 / 1024, 2)})
+
+
+@app.route("/api/backups")
+def api_backups():
+    config = get_app_config()
+    backups = sorted(config.data_dir.glob("vaction_backup_*.db"), reverse=True)
+    return jsonify({"backups": [
+        {"path": str(b), "name": b.name, "size_mb": round(b.stat().st_size / 1024 / 1024, 2), "modified": b.stat().st_mtime}
+        for b in backups
+    ]})
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
