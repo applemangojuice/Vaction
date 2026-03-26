@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Add Videos — Vaction{% endblock %}
+{% block content %}
+<h1>Add Videos</h1>
+<p class="subtitle">Import episode files from a local folder and extract frames for analysis</p>
+
+<div class="card">
+    <h2>Step 1: Select Folder & Settings</h2>
+    <div class="form-group">
+        <label>Folder Path</label>
+        <input type="text" id="folderPath" placeholder="e.g. ~/Videos/Severance/Season 1" />
+    </div>
+    <div class="row">
+        <div class="form-group">
+            <label>Series Name</label>
+            <input type="text" id="seriesName" placeholder="e.g. Severance" />
+        </div>
+        <div class="form-group">
+            <label>Frame Rate (fps)</label>
+            <select id="fps">
+                <option value="1">1 fps (least frames)</option>
+                <option value="2" selected>2 fps (recommended)</option>
+                <option value="5">5 fps</option>
+                <option value="10">10 fps (most frames)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Transcode</label>
+            <select id="transcode">
+                <option value="">No transcode (use original)</option>
+                <option value="480">480p</option>
+                <option value="720">720p</option>
+                <option value="1080">1080p</option>
+            </select>
+        </div>
+    </div>
+    <div style="margin-top:16px;">
+        <button class="btn" id="startBtn" onclick="startIngest()">Start Ingest + Frame Extraction</button>
+    </div>
+</div>
+
+<div class="card hidden" id="progressCard">
+    <h2>Step 2: Processing</h2>
+    <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+    <div class="log" id="logOutput"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function log(msg, cls) {
+    const el = document.getElementById('logOutput');
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = msg;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+}
+
+function startIngest() {
+    const path = document.getElementById('folderPath').value.trim();
+    const series = document.getElementById('seriesName').value.trim();
+    const fps = document.getElementById('fps').value;
+    const transcode = document.getElementById('transcode').value || null;
+
+    if (!path || !series) {
+        alert('Please enter a folder path and series name.');
+        return;
+    }
+
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('progressCard').classList.remove('hidden');
+    document.getElementById('logOutput').innerHTML = '';
+    log('Starting ingest...', 'info');
+
+    fetch('/api/ingest', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path, series, fps: parseFloat(fps), transcode}),
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            log('Error: ' + data.error, 'error');
+            document.getElementById('startBtn').disabled = false;
+            return;
+        }
+        const evtSource = new EventSource('/api/jobs/' + data.job_id + '/stream');
+
+        evtSource.addEventListener('status', e => {
+            log(e.data, 'info');
+        });
+
+        evtSource.addEventListener('progress', e => {
+            const d = JSON.parse(e.data);
+            log(`Episode ${d.episode}: ${d.frames} frames extracted`);
+        });
+
+        evtSource.addEventListener('complete', e => {
+            const d = JSON.parse(e.data);
+            log(`\nDone! ${d.episodes} episodes, ${d.total_frames.toLocaleString()} total frames.`, 'info');
+            document.getElementById('progressFill').style.width = '100%';
+            document.getElementById('startBtn').disabled = false;
+            evtSource.close();
+        });
+
+        evtSource.addEventListener('error', e => {
+            if (e.data) log('Error: ' + e.data, 'error');
+            document.getElementById('startBtn').disabled = false;
+            evtSource.close();
+        });
+    })
+    .catch(err => {
+        log('Request failed: ' + err, 'error');
+        document.getElementById('startBtn').disabled = false;
+    });
+}
+</script>
+{% endblock %}

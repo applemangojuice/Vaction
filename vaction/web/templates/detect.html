@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Run Detection — Vaction{% endblock %}
+{% block content %}
+<h1>Run Detection</h1>
+<p class="subtitle">Run object, scene, and face detection on extracted frames</p>
+
+<div class="card">
+    <h2>Select Series & Detectors</h2>
+    <div class="row">
+        <div class="form-group">
+            <label>Series</label>
+            <select id="seriesSelect">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Detectors</label>
+            <select id="detectors">
+                <option value="yolo,clip">Objects + Scenes (YOLO + CLIP)</option>
+                <option value="yolo">Objects only (YOLO)</option>
+                <option value="clip">Scenes only (CLIP)</option>
+                <option value="face">Faces only</option>
+                <option value="yolo,clip,face">All (Objects + Scenes + Faces)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Batch Size</label>
+            <select id="batchSize">
+                <option value="8">8</option>
+                <option value="16" selected>16</option>
+                <option value="32">32</option>
+            </select>
+        </div>
+    </div>
+    <div style="margin-top:16px;">
+        <button class="btn" id="startBtn" onclick="startDetection()">Start Detection</button>
+    </div>
+</div>
+
+<div class="card hidden" id="progressCard">
+    <h2>Detection Progress</h2>
+    <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+    <div id="progressText" style="font-size:13px; color:#888; margin-bottom:8px;"></div>
+    <div class="log" id="logOutput"></div>
+</div>
+
+<div class="card" id="runningJobs" style="display:none;">
+    <h2>Recent Jobs</h2>
+    <div id="jobsList"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Load series list
+fetch('/api/series').then(r=>r.json()).then(data=>{
+    const sel = document.getElementById('seriesSelect');
+    sel.innerHTML = '';
+    if (!data.series.length) {
+        sel.innerHTML = '<option value="">No series found — add videos first</option>';
+        return;
+    }
+    data.series.forEach(s=>{
+        sel.innerHTML += `<option value="${s.name}">${s.name}</option>`;
+    });
+});
+
+function log(msg, cls) {
+    const el = document.getElementById('logOutput');
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = msg;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+}
+
+function startDetection() {
+    const series = document.getElementById('seriesSelect').value;
+    const detectors = document.getElementById('detectors').value;
+    const batchSize = document.getElementById('batchSize').value;
+
+    if (!series) {
+        alert('Please select a series.');
+        return;
+    }
+
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('progressCard').classList.remove('hidden');
+    document.getElementById('logOutput').innerHTML = '';
+    document.getElementById('progressFill').style.width = '0%';
+    log('Starting detection...', 'info');
+
+    fetch('/api/detect', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({series, detectors, batch_size: parseInt(batchSize)}),
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            log('Error: ' + data.error, 'error');
+            document.getElementById('startBtn').disabled = false;
+            return;
+        }
+        const evtSource = new EventSource('/api/jobs/' + data.job_id + '/stream');
+
+        evtSource.addEventListener('status', e => {
+            log(e.data, 'info');
+        });
+
+        evtSource.addEventListener('progress', e => {
+            const d = JSON.parse(e.data);
+            document.getElementById('progressFill').style.width = d.pct + '%';
+            document.getElementById('progressText').textContent =
+                `${d.processed}/${d.total} frames (${d.pct}%) — ${d.detections.toLocaleString()} detections`;
+        });
+
+        evtSource.addEventListener('complete', e => {
+            const d = JSON.parse(e.data);
+            log(`\nDone! Processed ${d.frames_processed.toLocaleString()} frames, created ${d.total_detections.toLocaleString()} detections.`, 'info');
+            document.getElementById('progressFill').style.width = '100%';
+            document.getElementById('startBtn').disabled = false;
+            evtSource.close();
+        });
+
+        evtSource.addEventListener('error', e => {
+            if (e.data) log('Error: ' + e.data, 'error');
+            document.getElementById('startBtn').disabled = false;
+            evtSource.close();
+        });
+    })
+    .catch(err => {
+        log('Request failed: ' + err, 'error');
+        document.getElementById('startBtn').disabled = false;
+    });
+}
+</script>
+{% endblock %}

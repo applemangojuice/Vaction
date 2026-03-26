@@ -20,10 +20,12 @@ dependencies = [
     "Pillow>=10.0",
     "numpy>=1.24",
     "tqdm>=4.65",
+    "flask>=3.0",
 ]
 
 [project.scripts]
 vaction = "vaction.cli:cli"
+vaction-web = "vaction.web.app:main"
 
 [tool.setuptools.packages.find]
 include = ["vaction*"]

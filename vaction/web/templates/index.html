@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Vaction — Home{% endblock %}
+{% block content %}
+<h1>Vaction</h1>
+<p class="subtitle">Local video object categorization, indexing, and search over TV episodes</p>
+
+<div class="grid-2">
+    <a href="/add-videos" class="card" style="text-decoration:none; color:inherit;">
+        <h2>Add Videos</h2>
+        <p style="color:#666; font-size:14px;">Import episode files from a local folder, extract frames for analysis</p>
+    </a>
+    <a href="/detect" class="card" style="text-decoration:none; color:inherit;">
+        <h2>Run Detection</h2>
+        <p style="color:#666; font-size:14px;">Run object, scene, and face detection on extracted frames</p>
+    </a>
+    <a href="/search" class="card" style="text-decoration:none; color:inherit;">
+        <h2>Search & Charts</h2>
+        <p style="color:#666; font-size:14px;">Search by term, view pixel-time percentages, chart trends across episodes</p>
+    </a>
+    <a href="/status" class="card" style="text-decoration:none; color:inherit;">
+        <h2>Status</h2>
+        <p style="color:#666; font-size:14px;">View indexed series, episodes, frames, and detection counts</p>
+    </a>
+</div>
+
+<div class="card" id="quick-stats" style="margin-top:12px;">
+    <h2>Quick Stats</h2>
+    <div id="stats-content" style="color:#666;">Loading...</div>
+</div>
+
+<script>
+fetch('/api/status').then(r=>r.json()).then(data=>{
+    const el = document.getElementById('stats-content');
+    if(!data.series.length){
+        el.innerHTML = '<p>No videos indexed yet. Start by <a href="/add-videos" style="color:#4a9eff;">adding videos</a>.</p>';
+        return;
+    }
+    let html = '<div class="grid-2">';
+    let totEp=0, totFr=0, totDet=0;
+    data.series.forEach(s=>{totEp+=s.total_episodes; totFr+=s.total_frames; totDet+=s.total_detections;});
+    html += `<div><div class="stat-value">${data.series.length}</div><div class="stat-label">Series</div></div>`;
+    html += `<div><div class="stat-value">${totEp}</div><div class="stat-label">Episodes</div></div>`;
+    html += `<div><div class="stat-value">${totFr.toLocaleString()}</div><div class="stat-label">Frames</div></div>`;
+    html += `<div><div class="stat-value">${totDet.toLocaleString()}</div><div class="stat-label">Detections</div></div>`;
+    html += '</div>';
+    el.innerHTML = html;
+});
+</script>
+{% endblock %}
