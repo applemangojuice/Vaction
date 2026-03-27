@@ -254,6 +254,36 @@ def insert_detection(
     return cur.lastrowid
 
 
+def insert_detections_batch(
+    conn: sqlite3.Connection, detections_list: list[dict]
+) -> int:
+    """Batch-insert multiple detections using executemany. Returns row count."""
+    if not detections_list:
+        return 0
+    rows = [
+        (
+            d["frame_id"],
+            d["detector"],
+            d["label"],
+            d["confidence"],
+            d.get("bbox_x"),
+            d.get("bbox_y"),
+            d.get("bbox_w"),
+            d.get("bbox_h"),
+            d["pixel_area"],
+            json.dumps(d["attributes"]) if d.get("attributes") else None,
+        )
+        for d in detections_list
+    ]
+    conn.executemany(
+        """INSERT INTO detection
+        (frame_id, detector, label, confidence, bbox_x, bbox_y, bbox_w, bbox_h, pixel_area, attributes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        rows,
+    )
+    return len(rows)
+
+
 def insert_alias(conn: sqlite3.Connection, term: str, label: str) -> None:
     """Insert a search alias (e.g., 'vehicle' -> 'car')."""
     conn.execute(

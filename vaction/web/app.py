@@ -123,6 +123,16 @@ def charts_page():
     return render_template("charts.html")
 
 
+@app.route("/insights")
+def insights_page():
+    return render_template("insights.html")
+
+
+@app.route("/processing")
+def processing_page():
+    return render_template("processing.html")
+
+
 @app.route("/faces")
 def faces_page():
     return render_template("faces.html")
@@ -264,7 +274,7 @@ def api_detect():
     data = request.json
     series_name = data.get("series", "").strip()
     detectors = data.get("detectors", "yolo,clip")
-    batch_size = int(data.get("batch_size", 16))
+    batch_size = int(data.get("batch_size", 32))
     force = data.get("force", False)  # Re-detect even if already detected
 
     if not series_name:
@@ -694,6 +704,172 @@ def _expand_themes(conn, query_str: str) -> str:
         else:
             result.append(token)
     return " ".join(result)
+
+
+@app.route("/api/chart/breakdown")
+def api_chart_breakdown():
+    """Return per-label episode share data for each term.
+    If a term is a theme, break it down into its constituent labels.
+    Returns: {episodes: [...], series: [{name, labels: [{label, data: [...]}]}]}
+    """
+    series_name = request.args.get("series", "").strip()
+    terms = request.args.get("terms", "").strip()
+    confidence = float(request.args.get("confidence", 0.25))
+    episode_filter = request.args.get("episodes", "").strip()
+
+    if not series_name or not terms:
+        return jsonify({"error": "series and terms are required"}), 400
+
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not row:
+            return jsonify({"error": f"Series '{series_name}' not found"}), 404
+        series_id = row["id"]
+
+        from vaction.metrics import compute_episode_metrics
+
+        episodes = conn.execute("""
+            SELECT e.number as ep_num, s.number as season_num, e.title
+            FROM episode e JOIN season s ON e.season_id = s.id
+            WHERE s.series_id = ? ORDER BY s.number, e.number
+        """, (series_id,)).fetchall()
+
+        ep_labels = [f"S{e['season_num']:02d}E{e['ep_num']:02d}" for e in episodes]
+
+        if episode_filter:
+            filter_set = {e.strip().upper() for e in episode_filter.split(",") if e.strip()}
+            ep_labels = [lbl for lbl in ep_labels if lbl in filter_set]
+
+        # Get theme map for breakdown
+        themes = get_all_themes(conn)
+        theme_map = {t["name"].lower(): t["labels"] for t in themes}
+
+        term_list = [t.strip() for t in terms.split(",") if t.strip()]
+        groups = []  # each group = {name: str, labels: [{label, data: [...]}]}
+
+        for term in term_list:
+            lower = term.lower()
+            if lower in theme_map and theme_map[lower]:
+                # Theme: break into individual labels
+                sub_labels = theme_map[lower]
+                group = {"name": term, "labels": []}
+                for label in sub_labels:
+                    results = compute_episode_metrics(conn, label, confidence, series_id=series_id)
+                    ep_map = {f"S{r.season_number:02d}E{r.episode_number:02d}": round(r.episode_share_pct, 4) for r in results}
+                    group["labels"].append({"label": label, "data": [ep_map.get(ep, 0) for ep in ep_labels]})
+                groups.append(group)
+            else:
+                # Single label
+                expanded = _expand_themes(conn, term)
+                results = compute_episode_metrics(conn, expanded, confidence, series_id=series_id)
+                ep_map = {f"S{r.season_number:02d}E{r.episode_number:02d}": round(r.episode_share_pct, 4) for r in results}
+                groups.append({"name": term, "labels": [{"label": term, "data": [ep_map.get(ep, 0) for ep in ep_labels]}]})
+
+        return jsonify({"episodes": ep_labels, "groups": groups})
+    finally:
+        conn.close()
+
+
+@app.route("/api/insights")
+def api_insights():
+    """Auto-generate insights for a series: top labels, trends, anomalies."""
+    series_name = request.args.get("series", "").strip()
+    if not series_name:
+        return jsonify({"error": "series is required"}), 400
+
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not row:
+            return jsonify({"error": f"Series '{series_name}' not found"}), 404
+        series_id = row["id"]
+
+        from vaction.metrics import compute_episode_metrics
+
+        # Get all labels with detection counts
+        labels_data = conn.execute("""
+            SELECT d.label, COUNT(*) as count, AVG(d.confidence) as avg_conf,
+                   COUNT(DISTINCT f.episode_id) as episode_count
+            FROM detection d
+            JOIN frame f ON d.frame_id = f.id
+            JOIN episode e ON f.episode_id = e.id
+            JOIN season s ON e.season_id = s.id
+            WHERE s.series_id = ? AND d.label != 'unknown_face'
+            GROUP BY d.label
+            ORDER BY count DESC
+        """, (series_id,)).fetchall()
+
+        # Get episode list
+        episodes = conn.execute("""
+            SELECT e.id, e.number as ep_num, s.number as season_num, e.title,
+                   e.num_frames, e.width, e.height
+            FROM episode e JOIN season s ON e.season_id = s.id
+            WHERE s.series_id = ? ORDER BY s.number, e.number
+        """, (series_id,)).fetchall()
+
+        total_episodes = len(episodes)
+        ep_codes = [f"S{e['season_num']:02d}E{e['ep_num']:02d}" for e in episodes]
+
+        # Top 20 labels by detection count
+        top_labels = [{"label": r["label"], "count": r["count"],
+                       "avg_confidence": round(r["avg_conf"], 3),
+                       "episode_count": r["episode_count"],
+                       "coverage": round(r["episode_count"] / max(total_episodes, 1) * 100, 1)}
+                      for r in labels_data[:20]]
+
+        # Compute episode shares for top 10 labels to find trends
+        trending = []
+        declining = []
+        spiky = []
+        for label_info in labels_data[:15]:
+            label = label_info["label"]
+            results = compute_episode_metrics(conn, label, 0.25, series_id=series_id)
+            ep_map = {f"S{r.season_number:02d}E{r.episode_number:02d}": r.episode_share_pct for r in results}
+            shares = [ep_map.get(ep, 0) for ep in ep_codes]
+
+            if len(shares) >= 3:
+                first_half = sum(shares[:len(shares)//2])
+                second_half = sum(shares[len(shares)//2:])
+                if second_half > first_half * 1.5 and second_half > 0.001:
+                    trending.append({"label": label, "change": round((second_half - first_half) / max(first_half, 0.0001) * 100, 1), "shares": [round(s, 4) for s in shares]})
+                elif first_half > second_half * 1.5 and first_half > 0.001:
+                    declining.append({"label": label, "change": round((first_half - second_half) / max(second_half, 0.0001) * 100, 1), "shares": [round(s, 4) for s in shares]})
+
+                avg = sum(shares) / len(shares) if shares else 0
+                if avg > 0:
+                    max_share = max(shares)
+                    if max_share > avg * 3:
+                        peak_ep = ep_codes[shares.index(max_share)]
+                        spiky.append({"label": label, "peak_episode": peak_ep, "peak_value": round(max_share, 4), "avg_value": round(avg, 4)})
+
+        # Episode complexity (number of unique labels per episode)
+        ep_complexity = []
+        for ep in episodes:
+            unique_labels = conn.execute("""
+                SELECT COUNT(DISTINCT d.label) as c FROM detection d
+                JOIN frame f ON d.frame_id = f.id
+                WHERE f.episode_id = ?
+            """, (ep["id"],)).fetchone()["c"]
+            ep_complexity.append({
+                "code": f"S{ep['season_num']:02d}E{ep['ep_num']:02d}",
+                "title": ep["title"] or "",
+                "unique_labels": unique_labels,
+            })
+
+        return jsonify({
+            "series": series_name,
+            "total_episodes": total_episodes,
+            "total_labels": len(labels_data),
+            "episodes": ep_codes,
+            "top_labels": top_labels,
+            "trending": sorted(trending, key=lambda x: -x["change"])[:5],
+            "declining": sorted(declining, key=lambda x: -x["change"])[:5],
+            "spiky": sorted(spiky, key=lambda x: -x["peak_value"])[:5],
+            "episode_complexity": ep_complexity,
+        })
+    finally:
+        conn.close()
 
 
 # ── API: File browser ────────────────────────────────────────────────────────

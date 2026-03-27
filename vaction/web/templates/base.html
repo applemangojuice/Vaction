@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Vaction{% endblock %}</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.32.0/plotly.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -216,10 +217,12 @@
         <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Home</a>
         <a href="/add-videos" {% if request.path == '/add-videos' %}class="active"{% endif %}>Add Videos</a>
         <a href="/detect" {% if request.path == '/detect' %}class="active"{% endif %}>Detection</a>
+        <a href="/processing" {% if request.path == '/processing' %}class="active"{% endif %}>Processing</a>
         <a href="/vocabulary" {% if request.path == '/vocabulary' %}class="active"{% endif %}>Vocabulary</a>
         <a href="/themes" {% if request.path == '/themes' %}class="active"{% endif %}>Themes</a>
         <a href="/search" {% if request.path == '/search' %}class="active"{% endif %}>Search</a>
         <a href="/charts" {% if request.path == '/charts' %}class="active"{% endif %}>Charts</a>
+        <a href="/insights" {% if request.path == '/insights' %}class="active"{% endif %}>Insights</a>
         <a href="/faces" {% if request.path == '/faces' %}class="active"{% endif %}>Faces</a>
         <a href="/status" {% if request.path == '/status' %}class="active"{% endif %}>Status</a>
     </nav>

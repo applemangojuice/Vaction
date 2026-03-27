@@ -1,0 +1,400 @@
+{% extends "base.html" %}
+{% block title %}Processing — Vaction{% endblock %}
+{% block content %}
+<h1>Processing Hub</h1>
+<p class="subtitle">Start jobs, monitor progress, and view recent activity</p>
+
+<!-- Start New Jobs -->
+<div class="grid-2">
+    <div class="card">
+        <h2 style="color:#4a9eff;">Start Detection</h2>
+        <div class="form-group">
+            <label>Series</label>
+            <select id="detectSeries">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Detectors</label>
+            <select id="detectType">
+                <option value="yolo,clip">Objects + Scenes (YOLO + CLIP)</option>
+                <option value="yolo">Objects only (YOLO)</option>
+                <option value="clip">Scenes only (CLIP)</option>
+                <option value="face">Faces only</option>
+                <option value="yolo,clip,face">All (Objects + Scenes + Faces)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Batch Size</label>
+            <select id="detectBatch">
+                <option value="4">4 (safe)</option>
+                <option value="8">8</option>
+                <option value="16" selected>16</option>
+                <option value="32">32</option>
+            </select>
+        </div>
+        <div style="margin-bottom:12px;">
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; text-transform:none; letter-spacing:normal; font-size:14px; color:#ccc; margin:0;">
+                <input type="checkbox" id="detectForce" style="cursor:pointer;" />
+                Force re-detect
+            </label>
+        </div>
+        <button class="btn" onclick="startDetect()" id="startDetectBtn">Start Detection</button>
+    </div>
+
+    <div class="card">
+        <h2 style="color:#51cf66;">Start Ingest</h2>
+        <div class="form-group">
+            <label>Video Path</label>
+            <input type="text" id="ingestPath" placeholder="/path/to/video/files">
+        </div>
+        <div class="form-group">
+            <label>Series Name</label>
+            <input type="text" id="ingestSeries" placeholder="my-series">
+        </div>
+        <div class="form-group">
+            <label>FPS</label>
+            <input type="number" id="ingestFps" value="1" min="0.1" step="0.1">
+        </div>
+        <div style="margin-bottom:12px;">
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; text-transform:none; letter-spacing:normal; font-size:14px; color:#ccc; margin:0;">
+                <input type="checkbox" id="ingestTranscode" style="cursor:pointer;" />
+                Transcode videos
+            </label>
+        </div>
+        <button class="btn" style="background:#2b8a3e;" onclick="startIngest()" id="startIngestBtn">Start Ingest</button>
+    </div>
+</div>
+
+<!-- Active Jobs -->
+<div class="card" id="activeCard">
+    <h2>Active Jobs</h2>
+    <div id="activeJobs">
+        <p style="color:#666; font-size:14px;">No active jobs</p>
+    </div>
+</div>
+
+<!-- Recently Completed -->
+<div class="card" id="completedCard">
+    <h2>Recently Completed</h2>
+    <div id="completedJobs">
+        <p style="color:#666; font-size:14px;">No recent jobs</p>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<style>
+    .job-row {
+        border: 1px solid #2a2a2a;
+        border-radius: 8px;
+        margin-bottom: 8px;
+        overflow: hidden;
+        transition: border-color 0.2s;
+    }
+    .job-row:hover { border-color: #444; }
+    .job-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        cursor: pointer;
+        user-select: none;
+    }
+    .job-type-badge {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        padding: 3px 8px;
+        border-radius: 4px;
+        min-width: 70px;
+        text-align: center;
+    }
+    .job-type-ingest { background: #1a3a1a; color: #51cf66; }
+    .job-type-detect { background: #1a2a3a; color: #4a9eff; }
+    .job-type-facescan { background: #2a1a3a; color: #cc5de8; }
+    .job-progress-bar {
+        flex: 1;
+        height: 6px;
+        background: #222;
+        border-radius: 3px;
+        overflow: hidden;
+        max-width: 300px;
+    }
+    .job-progress-bar .fill {
+        height: 100%;
+        border-radius: 3px;
+        transition: width 0.5s;
+    }
+    .job-detail {
+        font-size: 12px;
+        color: #888;
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .job-pct {
+        font-size: 13px;
+        font-weight: 600;
+        min-width: 42px;
+        text-align: right;
+    }
+    .job-expand-arrow {
+        color: #555;
+        font-size: 12px;
+        transition: transform 0.2s;
+    }
+    .job-row.expanded .job-expand-arrow { transform: rotate(90deg); }
+    .job-log {
+        display: none;
+        background: #0a0a0a;
+        border-top: 1px solid #222;
+        padding: 12px 16px;
+        font-family: 'SF Mono', 'Menlo', monospace;
+        font-size: 12px;
+        color: #8b8;
+        max-height: 200px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        line-height: 1.5;
+    }
+    .job-row.expanded .job-log { display: block; }
+    .job-row.completed { opacity: 0.7; }
+    .job-row.completed:hover { opacity: 1; }
+    .job-status-done {
+        font-size: 11px;
+        color: #51cf66;
+        font-weight: 500;
+    }
+    .job-status-error {
+        font-size: 11px;
+        color: #e55;
+        font-weight: 500;
+    }
+</style>
+
+<script>
+const JOB_COLORS = {ingest: '#51cf66', detect: '#4a9eff', facescan: '#cc5de8'};
+const JOB_LABELS = {ingest: 'Ingest', detect: 'Detection', facescan: 'Face Scan'};
+
+let expandedJobs = new Set();
+let jobLogStreams = {};  // SSE connections per job
+let jobLogBuffers = {};  // accumulated log text per job
+let completedJobsList = [];
+let knownJobIds = new Set();
+
+// Load series list into the detect picker
+function loadSeries() {
+    fetch('/api/series').then(r => r.json()).then(data => {
+        const sel = document.getElementById('detectSeries');
+        sel.innerHTML = '<option value="">— select series —</option>';
+        (data.series || data || []).forEach(s => {
+            const name = typeof s === 'string' ? s : s.name;
+            sel.innerHTML += `<option value="${name}">${name}</option>`;
+        });
+    }).catch(() => {});
+}
+
+function startDetect() {
+    const series = document.getElementById('detectSeries').value;
+    if (!series) { alert('Select a series first'); return; }
+    const detectors = document.getElementById('detectType').value;
+    const batch_size = parseInt(document.getElementById('detectBatch').value);
+    const force = document.getElementById('detectForce').checked;
+
+    const btn = document.getElementById('startDetectBtn');
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+
+    fetch('/api/detect', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({series, detectors, batch_size, force})
+    }).then(r => r.json()).then(data => {
+        btn.disabled = false;
+        btn.textContent = 'Start Detection';
+        if (data.error) alert(data.error);
+        else pollJobs();
+    }).catch(() => {
+        btn.disabled = false;
+        btn.textContent = 'Start Detection';
+    });
+}
+
+function startIngest() {
+    const path = document.getElementById('ingestPath').value.trim();
+    const series = document.getElementById('ingestSeries').value.trim();
+    if (!path) { alert('Enter a video path'); return; }
+    if (!series) { alert('Enter a series name'); return; }
+    const fps = parseFloat(document.getElementById('ingestFps').value) || 1;
+    const transcode = document.getElementById('ingestTranscode').checked;
+
+    const btn = document.getElementById('startIngestBtn');
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+
+    fetch('/api/ingest', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path, series, fps, transcode})
+    }).then(r => r.json()).then(data => {
+        btn.disabled = false;
+        btn.textContent = 'Start Ingest';
+        if (data.error) alert(data.error);
+        else pollJobs();
+    }).catch(() => {
+        btn.disabled = false;
+        btn.textContent = 'Start Ingest';
+    });
+}
+
+function toggleJobExpand(jobId) {
+    if (expandedJobs.has(jobId)) {
+        expandedJobs.delete(jobId);
+        stopLogStream(jobId);
+    } else {
+        expandedJobs.add(jobId);
+        startLogStream(jobId);
+    }
+    renderJobs();
+}
+
+function startLogStream(jobId) {
+    if (jobLogStreams[jobId]) return;
+    if (!jobLogBuffers[jobId]) jobLogBuffers[jobId] = '';
+    try {
+        const es = new EventSource(`/api/jobs/${jobId}/stream`);
+        jobLogStreams[jobId] = es;
+        es.addEventListener('status', e => {
+            jobLogBuffers[jobId] += e.data + '\n';
+            updateLogDisplay(jobId);
+        });
+        es.addEventListener('progress', e => {
+            // progress events handled by polling
+        });
+        es.addEventListener('done', e => {
+            jobLogBuffers[jobId] += '--- Job complete ---\n';
+            updateLogDisplay(jobId);
+            es.close();
+            delete jobLogStreams[jobId];
+        });
+        es.addEventListener('error_msg', e => {
+            jobLogBuffers[jobId] += 'ERROR: ' + e.data + '\n';
+            updateLogDisplay(jobId);
+        });
+        es.onerror = () => {
+            es.close();
+            delete jobLogStreams[jobId];
+        };
+    } catch(e) {}
+}
+
+function stopLogStream(jobId) {
+    if (jobLogStreams[jobId]) {
+        jobLogStreams[jobId].close();
+        delete jobLogStreams[jobId];
+    }
+}
+
+function updateLogDisplay(jobId) {
+    const el = document.getElementById('log-' + jobId);
+    if (!el) return;
+    el.textContent = jobLogBuffers[jobId];
+    el.scrollTop = el.scrollHeight;
+}
+
+function buildJobRow(job, isCompleted) {
+    const type = job.type || 'detect';
+    const color = JOB_COLORS[type] || '#4a9eff';
+    const label = JOB_LABELS[type] || type;
+    const pct = job.progress && job.progress.pct ? job.progress.pct : 0;
+    const series = job.series ? ` — ${job.series}` : '';
+    const expanded = expandedJobs.has(job.job_id);
+    const expandedClass = expanded ? ' expanded' : '';
+    const completedClass = isCompleted ? ' completed' : '';
+
+    let detail = job.last_status || '';
+    if (job.progress && job.progress.processed != null && job.progress.total) {
+        detail = `${job.progress.processed}/${job.progress.total} frames`;
+        if (job.progress.detections !== undefined) detail += `, ${job.progress.detections} detections`;
+    }
+
+    let statusHtml = '';
+    if (isCompleted) {
+        if (job.status === 'error' || job.status === 'failed') {
+            statusHtml = '<span class="job-status-error">Failed</span>';
+        } else {
+            statusHtml = '<span class="job-status-done">Complete</span>';
+        }
+    } else {
+        statusHtml = `<span class="job-pct" style="color:${color};">${pct}%</span>`;
+    }
+
+    return `<div class="job-row${expandedClass}${completedClass}" id="job-${job.job_id}">
+        <div class="job-header" onclick="toggleJobExpand('${job.job_id}')">
+            <span class="job-expand-arrow">&#9654;</span>
+            <span class="job-type-badge job-type-${type}">${label}</span>
+            <span style="font-size:13px; color:#ccc; font-weight:500;">${job.series || ''}</span>
+            ${!isCompleted ? `<div class="job-progress-bar"><div class="fill" style="width:${pct}%; background:${color};"></div></div>` : ''}
+            <span class="job-detail">${detail}</span>
+            ${statusHtml}
+        </div>
+        <div class="job-log" id="log-${job.job_id}">${jobLogBuffers[job.job_id] || ''}</div>
+    </div>`;
+}
+
+function renderJobs() {
+    // handled inside pollJobs
+}
+
+function pollJobs() {
+    fetch('/api/jobs/active').then(r => r.json()).then(data => {
+        const allJobs = data.jobs || [];
+        const running = allJobs.filter(j => !j.status || j.status === 'running');
+        const done = allJobs.filter(j => j.status && j.status !== 'running');
+
+        // Track newly completed
+        done.forEach(j => {
+            if (!knownJobIds.has(j.job_id + ':done')) {
+                knownJobIds.add(j.job_id + ':done');
+                completedJobsList.unshift(j);
+                if (completedJobsList.length > 10) completedJobsList.pop();
+                // close any open streams
+                stopLogStream(j.job_id);
+            }
+        });
+
+        // Render active
+        const activeDiv = document.getElementById('activeJobs');
+        if (running.length === 0) {
+            activeDiv.innerHTML = '<p style="color:#666; font-size:14px;">No active jobs</p>';
+        } else {
+            activeDiv.innerHTML = running.map(j => buildJobRow(j, false)).join('');
+            // Re-attach log content for expanded
+            running.forEach(j => {
+                if (expandedJobs.has(j.job_id)) updateLogDisplay(j.job_id);
+            });
+        }
+
+        // Render completed
+        const compDiv = document.getElementById('completedJobs');
+        if (completedJobsList.length === 0) {
+            compDiv.innerHTML = '<p style="color:#666; font-size:14px;">No recent jobs</p>';
+        } else {
+            compDiv.innerHTML = completedJobsList.map(j => buildJobRow(j, true)).join('');
+            completedJobsList.forEach(j => {
+                if (expandedJobs.has(j.job_id)) updateLogDisplay(j.job_id);
+            });
+        }
+    }).catch(() => {});
+}
+
+// Init
+loadSeries();
+pollJobs();
+setInterval(pollJobs, 2000);
+</script>
+{% endblock %}

@@ -143,16 +143,22 @@ class CLIPDetector:
                 ))
         return detections
 
+    def _load_and_preprocess(self, fp: str):
+        """Load a single image and apply preprocessing (I/O-bound)."""
+        from PIL import Image
+
+        img = Image.open(fp).convert("RGB")
+        return self.preprocess(img)
+
     def detect_batch(
         self, frame_paths: list[str], frame_width: int, frame_height: int
     ) -> list[list[DetectionResult]]:
         import torch
-        from PIL import Image
+        from concurrent.futures import ThreadPoolExecutor
 
-        images = []
-        for fp in frame_paths:
-            img = Image.open(fp).convert("RGB")
-            images.append(self.preprocess(img))
+        # Prefetch and preprocess images in parallel threads (I/O-bound)
+        with ThreadPoolExecutor(max_workers=min(8, len(frame_paths))) as pool:
+            images = list(pool.map(self._load_and_preprocess, frame_paths))
 
         batch = torch.stack(images).to(self.device)
 
