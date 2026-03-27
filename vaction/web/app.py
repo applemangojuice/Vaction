@@ -30,7 +30,41 @@ app = Flask(
 # Global state for background jobs
 _jobs: dict[str, dict] = {}
 _job_queues: dict[str, queue.Queue] = {}
+_job_logs: dict[str, list] = {}  # Store recent log messages per job
 _config: VactionConfig | None = None
+
+
+def _job_update(job_id: str, **kwargs):
+    """Update a job's state. Thread-safe because GIL protects dict updates."""
+    if job_id in _jobs:
+        _jobs[job_id].update(kwargs)
+
+
+def _job_put(job_id: str, event: str, data: str, log: bool = True):
+    """Put an event on the job queue AND update _jobs progress state."""
+    if job_id in _job_queues:
+        _job_queues[job_id].put({"event": event, "data": data})
+    # Store latest progress in _jobs for polling
+    if job_id in _jobs:
+        if event == "progress":
+            try:
+                _jobs[job_id]["progress"] = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        elif event == "status":
+            _jobs[job_id]["last_status"] = data
+        elif event == "complete":
+            _jobs[job_id]["status"] = "done"
+            try:
+                _jobs[job_id]["result"] = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                _jobs[job_id]["result"] = data
+        elif event == "error":
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = data
+    # Store log messages
+    if log and job_id in _job_logs:
+        _job_logs[job_id].append({"event": event, "data": data, "time": time.time()})
 
 
 def get_app_config() -> VactionConfig:
@@ -170,10 +204,10 @@ def api_ingest():
 
     job_id = f"ingest_{int(time.time())}"
     _job_queues[job_id] = queue.Queue()
-    _jobs[job_id] = {"type": "ingest", "status": "running", "series": series_name}
+    _job_logs[job_id] = []
+    _jobs[job_id] = {"type": "ingest", "status": "running", "series": series_name, "progress": None, "last_status": "", "page": "/add-videos"}
 
     def run_ingest():
-        q = _job_queues[job_id]
         try:
             config = get_app_config()
             config_overrides = {"default_fps": fps, "data_dir": config.data_dir}
@@ -182,37 +216,39 @@ def api_ingest():
             cfg = get_config(**config_overrides)
             cfg.ensure_dirs()
 
-            q.put({"event": "status", "data": "Scanning for video files..."})
+            _job_put(job_id, "status", "Scanning for video files...")
 
             from vaction.ingest import ingest_directory
             conn = init_db(cfg.db_path)
             try:
                 episode_ids = ingest_directory(conn, root, series_name, cfg)
-                q.put({"event": "status", "data": f"Found {len(episode_ids)} episodes. Extracting frames at {fps} fps..."})
+                _job_put(job_id, "status", f"Found {len(episode_ids)} episodes. Extracting frames at {fps} fps...")
 
                 if episode_ids:
                     from vaction.sampler import sample_episodes
+                    total_eps = len(episode_ids)
 
                     def progress_cb(ep_id, count):
                         row = conn.execute("SELECT number FROM episode WHERE id = ?", (ep_id,)).fetchone()
                         ep_num = row["number"] if row else ep_id
-                        q.put({"event": "progress", "data": json.dumps({
+                        _job_put(job_id, "progress", json.dumps({
                             "episode": ep_num, "frames": count,
                             "done": False,
-                        })})
+                            "pct": 0,  # ingest doesn't have a total for %
+                        }))
 
                     results = sample_episodes(conn, episode_ids, cfg.frames_dir, fps=fps, progress_callback=progress_cb)
                     total_frames = sum(results.values())
-                    q.put({"event": "complete", "data": json.dumps({
+                    _job_put(job_id, "complete", json.dumps({
                         "episodes": len(episode_ids),
                         "total_frames": total_frames,
-                    })})
+                    }))
                 else:
-                    q.put({"event": "complete", "data": json.dumps({"episodes": 0, "total_frames": 0})})
+                    _job_put(job_id, "complete", json.dumps({"episodes": 0, "total_frames": 0}))
             finally:
                 conn.close()
         except Exception as e:
-            q.put({"event": "error", "data": str(e)})
+            _job_put(job_id, "error", str(e))
         finally:
             _jobs[job_id]["status"] = "done"
 
@@ -236,17 +272,17 @@ def api_detect():
 
     job_id = f"detect_{int(time.time())}"
     _job_queues[job_id] = queue.Queue()
-    _jobs[job_id] = {"type": "detect", "status": "running", "series": series_name}
+    _job_logs[job_id] = []
+    _jobs[job_id] = {"type": "detect", "status": "running", "series": series_name, "progress": None, "last_status": "", "page": "/detect"}
 
     def run_detect():
-        q = _job_queues[job_id]
         try:
             config = get_app_config()
             conn = init_db(config.db_path)
             try:
                 row = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
                 if not row:
-                    q.put({"event": "error", "data": f"Series '{series_name}' not found"})
+                    _job_put(job_id, "error", f"Series '{series_name}' not found")
                     return
 
                 from vaction.detectors.registry import DetectorRegistry
@@ -254,7 +290,7 @@ def api_detect():
                 detector_names = [d.strip() for d in detectors.split(",")]
                 dev = config.device
 
-                q.put({"event": "status", "data": f"Loading models: {', '.join(detector_names)}..."})
+                _job_put(job_id, "status", f"Loading models: {', '.join(detector_names)}...")
 
                 for name in detector_names:
                     if name == "yolo":
@@ -275,11 +311,11 @@ def api_detect():
                         det.load_character_embeddings(conn, row["id"])
                         registry.register(det)
 
-                q.put({"event": "status", "data": "Models loaded. Querying frames..."})
+                _job_put(job_id, "status", "Models loaded. Querying frames...")
 
                 # If force mode, clear existing detections for this series first
                 if force:
-                    q.put({"event": "status", "data": "Force mode: clearing existing detections..."})
+                    _job_put(job_id, "status", "Force mode: clearing existing detections...")
                     # Get the specific detectors being re-run
                     conn.execute("""
                         DELETE FROM detection WHERE id IN (
@@ -323,7 +359,7 @@ def api_detect():
                     WHERE sr.name = ?
                 """, (series_name,)).fetchone()["c"]
 
-                q.put({"event": "status", "data": f"Series '{series_name}': {total_all} total frames, {total_with_files} with files, {already_detected} already detected"})
+                _job_put(job_id, "status", f"Series '{series_name}': {total_all} total frames, {total_with_files} with files, {already_detected} already detected")
 
                 frames_query = """
                     SELECT f.id, f.file_path, e.width, e.height
@@ -347,12 +383,12 @@ def api_detect():
                         msg += f" {already_detected} frames already detected. Enable 'Force re-detect' to re-run."
                     elif total_with_files == 0:
                         msg += f" {total_all} frames exist but none have file paths. Frame files may have been deleted."
-                    q.put({"event": "status", "data": msg})
-                    q.put({"event": "complete", "data": json.dumps({"total_detections": 0, "frames_processed": 0})})
+                    _job_put(job_id, "status", msg)
+                    _job_put(job_id, "complete", json.dumps({"total_detections": 0, "frames_processed": 0}))
                     return
 
                 total_frames = len(frames)
-                q.put({"event": "status", "data": f"Processing {total_frames} frames..."})
+                _job_put(job_id, "status", f"Processing {total_frames} frames...")
                 total_detections = 0
 
                 for i in range(0, total_frames, batch_size):
@@ -366,24 +402,25 @@ def api_detect():
                     conn.commit()
 
                     processed = min(i + batch_size, total_frames)
-                    q.put({"event": "progress", "data": json.dumps({
+                    _job_put(job_id, "progress", json.dumps({
                         "processed": processed,
                         "total": total_frames,
                         "detections": total_detections,
                         "pct": round(processed / total_frames * 100, 1),
-                    })})
+                    }))
 
-                q.put({"event": "complete", "data": json.dumps({
+                _job_put(job_id, "complete", json.dumps({
                     "total_detections": total_detections,
                     "frames_processed": total_frames,
-                })})
+                }))
             finally:
                 conn.close()
         except Exception as e:
             import traceback
-            q.put({"event": "error", "data": f"{e}\n{traceback.format_exc()}"})
+            _job_put(job_id, "error", f"{e}\n{traceback.format_exc()}")
         finally:
-            _jobs[job_id]["status"] = "done"
+            if _jobs[job_id]["status"] == "running":
+                _jobs[job_id]["status"] = "done"
 
     threading.Thread(target=run_detect, daemon=True).start()
     return jsonify({"job_id": job_id})
@@ -414,6 +451,37 @@ def job_stream(job_id):
 @app.route("/api/jobs")
 def api_jobs():
     return jsonify({jid: {"type": j["type"], "status": j["status"], "series": j.get("series")} for jid, j in _jobs.items()})
+
+
+@app.route("/api/jobs/active")
+def api_jobs_active():
+    """Return all currently running jobs with progress info — polled by global status bar."""
+    active = []
+    for jid, j in _jobs.items():
+        if j["status"] in ("running",):
+            active.append({
+                "job_id": jid,
+                "type": j["type"],
+                "series": j.get("series", ""),
+                "page": j.get("page", ""),
+                "last_status": j.get("last_status", ""),
+                "progress": j.get("progress"),
+            })
+    # Also include recently completed (last 10 seconds) so UI can show "done"
+    for jid, j in _jobs.items():
+        if j["status"] in ("done", "error") and j.get("progress"):
+            active.append({
+                "job_id": jid,
+                "type": j["type"],
+                "series": j.get("series", ""),
+                "page": j.get("page", ""),
+                "status": j["status"],
+                "last_status": j.get("last_status", ""),
+                "progress": j.get("progress"),
+                "result": j.get("result"),
+                "error": j.get("error"),
+            })
+    return jsonify({"jobs": active})
 
 
 # ── API: Search ──────────────────────────────────────────────────────────────
@@ -849,10 +917,10 @@ def api_faces_scan():
 
     job_id = f"facescan_{int(time.time())}"
     _job_queues[job_id] = queue.Queue()
-    _jobs[job_id] = {"type": "facescan", "status": "running", "series": series_name}
+    _job_logs[job_id] = []
+    _jobs[job_id] = {"type": "facescan", "status": "running", "series": series_name, "progress": None, "last_status": "", "page": "/faces"}
 
     def run_facescan():
-        q = _job_queues[job_id]
         try:
             import numpy as np
             config = get_app_config()
@@ -860,7 +928,7 @@ def api_faces_scan():
             try:
                 row = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
                 if not row:
-                    q.put({"event": "error", "data": f"Series '{series_name}' not found"})
+                    _job_put(job_id, "error", f"Series '{series_name}' not found")
                     return
                 series_id = row["id"]
 
@@ -880,11 +948,11 @@ def api_faces_scan():
                 """, (series_id,)).fetchall()
 
                 if not face_dets:
-                    q.put({"event": "status", "data": "No face detections found. Run detection with 'Faces only' or 'All' detectors first, then come back here to cluster."})
-                    q.put({"event": "complete", "data": json.dumps({"clusters": 0})})
+                    _job_put(job_id, "status", "No face detections found. Run detection with 'Faces only' or 'All' detectors first, then come back here to cluster.")
+                    _job_put(job_id, "complete", json.dumps({"clusters": 0}))
                     return
 
-                q.put({"event": "status", "data": f"Found {len(face_dets)} face detections. Computing embeddings..."})
+                _job_put(job_id, "status", f"Found {len(face_dets)} face detections. Computing embeddings...")
 
                 # Extract face embeddings using insightface
                 from vaction.detectors.faces import FaceDetector
@@ -925,13 +993,13 @@ def api_faces_scan():
                         continue
 
                     if (i + 1) % 50 == 0:
-                        q.put({"event": "progress", "data": json.dumps({"processed": i + 1, "total": len(face_dets)})})
+                        _job_put(job_id, "progress", json.dumps({"processed": i + 1, "total": len(face_dets), "pct": round((i+1)/len(face_dets)*100, 1)}))
 
                 if not embeddings:
-                    q.put({"event": "complete", "data": json.dumps({"clusters": 0})})
+                    _job_put(job_id, "complete", json.dumps({"clusters": 0}))
                     return
 
-                q.put({"event": "status", "data": f"Got {len(embeddings)} embeddings. Clustering..."})
+                _job_put(job_id, "status", f"Got {len(embeddings)} embeddings. Clustering...")
 
                 # Simple agglomerative clustering by cosine similarity
                 emb_matrix = np.stack(embeddings)
@@ -979,14 +1047,15 @@ def api_faces_scan():
                     )
 
                 conn.commit()
-                q.put({"event": "complete", "data": json.dumps({"clusters": len(cluster_map), "faces": len(embeddings)})})
+                _job_put(job_id, "complete", json.dumps({"clusters": len(cluster_map), "faces": len(embeddings)}))
             finally:
                 conn.close()
         except Exception as e:
             import traceback
-            q.put({"event": "error", "data": f"{e}\n{traceback.format_exc()}"})
+            _job_put(job_id, "error", f"{e}\n{traceback.format_exc()}")
         finally:
-            _jobs[job_id]["status"] = "done"
+            if _jobs[job_id]["status"] == "running":
+                _jobs[job_id]["status"] = "done"
 
     threading.Thread(target=run_facescan, daemon=True).start()
     return jsonify({"job_id": job_id})

@@ -223,9 +223,55 @@
         <a href="/faces" {% if request.path == '/faces' %}class="active"{% endif %}>Faces</a>
         <a href="/status" {% if request.path == '/status' %}class="active"{% endif %}>Status</a>
     </nav>
+    <!-- Global job status bar -->
+    <div id="globalJobBar" style="display:none; background:#0d1117; border-bottom:1px solid #2a2a2a; padding:0;"></div>
     <div class="container">
         {% block content %}{% endblock %}
     </div>
     {% block scripts %}{% endblock %}
+    <script>
+    (function(){
+        const JOB_LABELS = {ingest: 'Add Videos', detect: 'Detection', facescan: 'Face Scan'};
+        const JOB_COLORS = {ingest: '#51cf66', detect: '#4a9eff', facescan: '#cc5de8'};
+        const bar = document.getElementById('globalJobBar');
+        let seenDone = {};
+
+        function pollJobs() {
+            fetch('/api/jobs/active').then(r=>r.json()).then(data=>{
+                const running = data.jobs.filter(j => !j.status || j.status === 'running');
+                if (running.length === 0) {
+                    bar.style.display = 'none';
+                    bar.innerHTML = '';
+                    return;
+                }
+                bar.style.display = 'block';
+                let html = '';
+                running.forEach(j => {
+                    const label = JOB_LABELS[j.type] || j.type;
+                    const color = JOB_COLORS[j.type] || '#4a9eff';
+                    const pct = j.progress && j.progress.pct ? j.progress.pct : 0;
+                    const series = j.series ? ` — ${j.series}` : '';
+                    let detail = j.last_status || '';
+                    if (j.progress && j.progress.processed && j.progress.total) {
+                        detail = `${j.progress.processed}/${j.progress.total} frames`;
+                        if (j.progress.detections !== undefined) detail += `, ${j.progress.detections} detections`;
+                    }
+                    const page = j.page || '#';
+                    html += `<a href="${page}" style="display:flex;align-items:center;gap:12px;padding:6px 24px;text-decoration:none;color:#ccc;font-size:12px;">
+                        <span style="font-weight:600;color:${color};min-width:90px;">${label}${series}</span>
+                        <div style="flex:1;height:4px;background:#222;border-radius:2px;overflow:hidden;max-width:400px;">
+                            <div style="width:${pct}%;height:100%;background:${color};border-radius:2px;transition:width 0.5s;"></div>
+                        </div>
+                        <span style="min-width:40px;text-align:right;color:#888;">${pct}%</span>
+                        <span style="color:#666;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${detail}</span>
+                    </a>`;
+                });
+                bar.innerHTML = html;
+            }).catch(()=>{});
+        }
+        pollJobs();
+        setInterval(pollJobs, 2000);
+    })();
+    </script>
 </body>
 </html>
