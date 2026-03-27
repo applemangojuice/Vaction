@@ -1,0 +1,420 @@
+{% extends "base.html" %}
+{% block title %}Vaction — Data Explorer{% endblock %}
+{% block content %}
+<h1>Data Explorer</h1>
+<p class="subtitle">Browse detections, preview frames, and explore episode timelines</p>
+
+<!-- Controls -->
+<div class="card">
+    <div class="row" style="flex-wrap:wrap;">
+        <div class="form-group">
+            <label>Series</label>
+            <select id="seriesSelect">
+                <option value="">Select series...</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Episode</label>
+            <select id="episodeSelect">
+                <option value="">All episodes</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Label</label>
+            <select id="labelSelect">
+                <option value="">All labels</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Detector</label>
+            <select id="detectorSelect">
+                <option value="">All</option>
+                <option value="yolo">YOLO</option>
+                <option value="clip">CLIP</option>
+                <option value="face">Face</option>
+            </select>
+        </div>
+        <div class="form-group" style="display:flex; align-items:flex-end; gap:8px;">
+            <button class="btn" onclick="loadDetections(1)">Search</button>
+            <button class="btn btn-secondary" onclick="exportData('csv')">Export CSV</button>
+            <button class="btn btn-secondary" onclick="exportData('json')">Export JSON</button>
+        </div>
+    </div>
+</div>
+
+<!-- Timeline -->
+<div class="card hidden" id="timelineCard">
+    <h2>Episode Timeline</h2>
+    <p class="subtitle" id="timelineSubtitle"></p>
+    <div id="timelinePlot" style="width:100%; height:120px;"></div>
+    <div id="timelineLegend" class="pill-row" style="margin-top:8px;"></div>
+</div>
+
+<!-- Results Info -->
+<div id="resultsInfo" class="hidden" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+    <span id="resultsCount" style="color:#888; font-size:14px;"></span>
+    <div id="pagination" style="display:flex; gap:8px; align-items:center;"></div>
+</div>
+
+<!-- Detection Table + Frame Preview side by side -->
+<div style="display:flex; gap:20px; align-items:flex-start;">
+    <div style="flex:1; min-width:0;">
+        <div class="card" id="tableCard" style="overflow-x:auto;">
+            <table id="detectionsTable">
+                <thead>
+                    <tr>
+                        <th style="cursor:pointer;" onclick="sortBy('episode_code')">Episode</th>
+                        <th style="cursor:pointer;" onclick="sortBy('timestamp')">Time</th>
+                        <th style="cursor:pointer;" onclick="sortBy('label')">Label</th>
+                        <th style="cursor:pointer;" onclick="sortBy('detector')">Detector</th>
+                        <th style="cursor:pointer;" onclick="sortBy('confidence')">Confidence</th>
+                        <th>Preview</th>
+                    </tr>
+                </thead>
+                <tbody id="detectionsBody">
+                    <tr><td colspan="6" style="color:#666; text-align:center; padding:40px;">Select a series to begin exploring detections.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Frame Preview Panel -->
+    <div id="previewPanel" class="card hidden" style="width:420px; flex-shrink:0; position:sticky; top:20px;">
+        <h2 id="previewTitle">Frame Preview</h2>
+        <div style="position:relative; margin-bottom:12px;">
+            <canvas id="previewCanvas" style="width:100%; border-radius:8px; background:#000;"></canvas>
+        </div>
+        <div id="previewInfo" style="font-size:13px; color:#888;"></div>
+        <div id="previewDetections" style="margin-top:12px;"></div>
+    </div>
+</div>
+
+<script>
+const API = {
+    series: null,
+    episode: '',
+    label: '',
+    detector: '',
+    page: 1,
+    perPage: 50,
+    sortField: null,
+    sortDir: 'asc',
+    detections: [],
+    total: 0,
+    pages: 0,
+};
+
+// ---- Init ----
+async function init() {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+    const sel = document.getElementById('seriesSelect');
+    data.series.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.name;
+        opt.textContent = s.name;
+        sel.appendChild(opt);
+    });
+    sel.addEventListener('change', onSeriesChange);
+    document.getElementById('episodeSelect').addEventListener('change', onEpisodeChange);
+    document.getElementById('labelSelect').addEventListener('change', () => { API.label = document.getElementById('labelSelect').value; });
+    document.getElementById('detectorSelect').addEventListener('change', () => { API.detector = document.getElementById('detectorSelect').value; });
+}
+
+async function onSeriesChange() {
+    API.series = document.getElementById('seriesSelect').value;
+    if (!API.series) return;
+
+    // Load episodes
+    const epResp = await fetch(`/api/episodes?series=${encodeURIComponent(API.series)}`);
+    const epData = await epResp.json();
+    const epSel = document.getElementById('episodeSelect');
+    epSel.innerHTML = '<option value="">All episodes</option>';
+    (epData.episodes || []).forEach(ep => {
+        const opt = document.createElement('option');
+        opt.value = ep.code;
+        opt.textContent = `${ep.code} — ${ep.title || ''}`;
+        epSel.appendChild(opt);
+    });
+
+    // Load labels
+    const lblResp = await fetch(`/api/explorer/labels?series=${encodeURIComponent(API.series)}`);
+    const lblData = await lblResp.json();
+    const lblSel = document.getElementById('labelSelect');
+    lblSel.innerHTML = '<option value="">All labels</option>';
+    (lblData.labels || []).forEach(l => {
+        const opt = document.createElement('option');
+        opt.value = l;
+        opt.textContent = l;
+        lblSel.appendChild(opt);
+    });
+
+    loadDetections(1);
+}
+
+function onEpisodeChange() {
+    API.episode = document.getElementById('episodeSelect').value;
+    if (API.episode) {
+        loadTimeline();
+    } else {
+        document.getElementById('timelineCard').classList.add('hidden');
+    }
+}
+
+// ---- Load Detections ----
+async function loadDetections(page) {
+    API.page = page || 1;
+    API.series = document.getElementById('seriesSelect').value;
+    API.episode = document.getElementById('episodeSelect').value;
+    API.label = document.getElementById('labelSelect').value;
+    API.detector = document.getElementById('detectorSelect').value;
+
+    if (!API.series) return;
+
+    const params = new URLSearchParams({
+        series: API.series,
+        page: API.page,
+        per_page: API.perPage,
+    });
+    if (API.episode) params.set('episode', API.episode);
+    if (API.label) params.set('label', API.label);
+    if (API.detector) params.set('detector', API.detector);
+
+    const resp = await fetch(`/api/explorer?${params}`);
+    const data = await resp.json();
+
+    if (data.error) {
+        document.getElementById('detectionsBody').innerHTML =
+            `<tr><td colspan="6" style="color:#e55; text-align:center;">${data.error}</td></tr>`;
+        return;
+    }
+
+    API.detections = data.detections;
+    API.total = data.total;
+    API.pages = data.pages;
+    API.page = data.page;
+
+    renderTable();
+    renderPagination();
+
+    document.getElementById('resultsInfo').classList.remove('hidden');
+    document.getElementById('resultsInfo').style.display = 'flex';
+    document.getElementById('resultsCount').textContent = `${data.total.toLocaleString()} detections found`;
+}
+
+function renderTable() {
+    let dets = [...API.detections];
+    if (API.sortField) {
+        dets.sort((a, b) => {
+            let va = a[API.sortField], vb = b[API.sortField];
+            if (typeof va === 'string') va = va.toLowerCase();
+            if (typeof vb === 'string') vb = vb.toLowerCase();
+            if (va < vb) return API.sortDir === 'asc' ? -1 : 1;
+            if (va > vb) return API.sortDir === 'asc' ? 1 : -1;
+            return 0;
+        });
+    }
+
+    const tbody = document.getElementById('detectionsBody');
+    if (!dets.length) {
+        tbody.innerHTML = '<tr><td colspan="6" style="color:#666; text-align:center; padding:40px;">No detections found.</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = dets.map(d => `
+        <tr onclick="showPreview(${d.frame_id}, ${d.id})" style="cursor:pointer;">
+            <td><span class="tag">${d.episode_code}</span></td>
+            <td>${formatTime(d.timestamp)}</td>
+            <td>${d.label}</td>
+            <td>${d.detector}</td>
+            <td>${(d.confidence * 100).toFixed(1)}%</td>
+            <td><img src="/api/explorer/frame/${d.frame_id}" style="width:64px; height:48px; object-fit:cover; border-radius:4px; background:#222;" onerror="this.style.display='none'" loading="lazy"></td>
+        </tr>
+    `).join('');
+}
+
+function renderPagination() {
+    const div = document.getElementById('pagination');
+    if (API.pages <= 1) { div.innerHTML = ''; return; }
+
+    let html = '';
+    if (API.page > 1) html += `<button class="btn btn-secondary" onclick="loadDetections(${API.page - 1})" style="padding:6px 12px; font-size:12px;">Prev</button>`;
+    html += `<span style="color:#888; font-size:13px;">Page ${API.page} of ${API.pages}</span>`;
+    if (API.page < API.pages) html += `<button class="btn btn-secondary" onclick="loadDetections(${API.page + 1})" style="padding:6px 12px; font-size:12px;">Next</button>`;
+    div.innerHTML = html;
+}
+
+function sortBy(field) {
+    if (API.sortField === field) {
+        API.sortDir = API.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        API.sortField = field;
+        API.sortDir = 'asc';
+    }
+    renderTable();
+}
+
+// ---- Timeline ----
+async function loadTimeline() {
+    if (!API.series || !API.episode) return;
+
+    const resp = await fetch(`/api/explorer/timeline?series=${encodeURIComponent(API.series)}&episode=${encodeURIComponent(API.episode)}`);
+    const data = await resp.json();
+    if (data.error) return;
+
+    const card = document.getElementById('timelineCard');
+    card.classList.remove('hidden');
+    document.getElementById('timelineSubtitle').textContent =
+        `${API.episode} — ${Math.round(data.duration / 60)} min — ${data.segments.length} active segments`;
+
+    // Build Plotly stacked bar
+    const allLabels = Object.keys(data.label_colors).sort();
+    const traces = allLabels.map(label => {
+        const x = [];
+        const y = [];
+        const customdata = [];
+        data.segments.forEach(seg => {
+            x.push(seg.start);
+            y.push(seg.labels[label] || 0);
+            customdata.push(seg);
+        });
+        return {
+            name: label,
+            type: 'bar',
+            x: x,
+            y: y,
+            marker: { color: data.label_colors[label] },
+            customdata: customdata,
+            hovertemplate: `${label}: %{y}<br>Time: %{x}s<extra></extra>`,
+        };
+    });
+
+    const layout = {
+        barmode: 'stack',
+        bargap: 0.05,
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        font: { color: '#888', size: 11 },
+        margin: { t: 10, b: 35, l: 40, r: 10 },
+        xaxis: {
+            title: { text: 'Time (seconds)', font: { size: 11 } },
+            color: '#666',
+            gridcolor: '#222',
+        },
+        yaxis: {
+            title: { text: 'Detections', font: { size: 11 } },
+            color: '#666',
+            gridcolor: '#222',
+        },
+        showlegend: false,
+        height: 110,
+    };
+
+    Plotly.newPlot('timelinePlot', traces, layout, { responsive: true, displayModeBar: false });
+
+    // Click handler for timeline
+    document.getElementById('timelinePlot').on('plotly_click', function(eventData) {
+        if (eventData.points.length) {
+            const seg = eventData.points[0].customdata;
+            if (seg && seg.start !== undefined) {
+                // Find the first detection around that timestamp and scroll to it
+                const rows = document.querySelectorAll('#detectionsBody tr');
+                for (const row of rows) {
+                    const timeCell = row.querySelector('td:nth-child(2)');
+                    if (timeCell) {
+                        const t = parseTime(timeCell.textContent);
+                        if (t >= seg.start && t < seg.end) {
+                            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            row.style.background = '#1a2a3a';
+                            setTimeout(() => row.style.background = '', 2000);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Legend
+    const legend = document.getElementById('timelineLegend');
+    legend.innerHTML = allLabels.map(l =>
+        `<span class="pill" style="background:${data.label_colors[l]}22; color:${data.label_colors[l]}; border:1px solid ${data.label_colors[l]}44;">${l}</span>`
+    ).join('');
+}
+
+// ---- Frame Preview ----
+async function showPreview(frameId, detectionId) {
+    const panel = document.getElementById('previewPanel');
+    panel.classList.remove('hidden');
+
+    const canvas = document.getElementById('previewCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Load frame image
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = function() {
+        const maxW = 400;
+        const scale = maxW / img.width;
+        canvas.width = maxW;
+        canvas.height = img.height * scale;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // Draw bounding boxes for all detections on this frame
+        const frameDets = API.detections.filter(d => d.frame_id === frameId);
+        frameDets.forEach(d => {
+            if (d.bbox_x !== null && d.bbox_w !== null) {
+                ctx.strokeStyle = d.id === detectionId ? '#4a9eff' : '#ff6b6b';
+                ctx.lineWidth = d.id === detectionId ? 3 : 1.5;
+                ctx.strokeRect(d.bbox_x * scale, d.bbox_y * scale, d.bbox_w * scale, d.bbox_h * scale);
+                ctx.fillStyle = ctx.strokeStyle;
+                ctx.font = '11px sans-serif';
+                ctx.fillText(`${d.label} ${(d.confidence * 100).toFixed(0)}%`, d.bbox_x * scale, d.bbox_y * scale - 4);
+            }
+        });
+
+        // Info
+        const det = API.detections.find(d => d.id === detectionId);
+        if (det) {
+            document.getElementById('previewTitle').textContent = `Frame #${frameId}`;
+            document.getElementById('previewInfo').innerHTML = `
+                <div style="margin-bottom:6px;"><strong>${det.episode_code}</strong> ${det.episode_title ? '— ' + det.episode_title : ''}</div>
+                <div>Timestamp: <strong>${formatTime(det.timestamp)}</strong></div>
+            `;
+        }
+
+        // List all detections on this frame
+        const detHtml = frameDets.map(d =>
+            `<div style="padding:4px 0; border-bottom:1px solid #1a1a1a; font-size:12px; ${d.id === detectionId ? 'color:#4a9eff;' : ''}">
+                <span class="tag" style="margin-right:6px;">${d.detector}</span>
+                ${d.label} — ${(d.confidence * 100).toFixed(1)}%
+                ${d.bbox_w ? ` — ${d.bbox_w}x${d.bbox_h}px` : ''}
+            </div>`
+        ).join('');
+        document.getElementById('previewDetections').innerHTML = detHtml;
+    };
+    img.src = `/api/explorer/frame/${frameId}`;
+}
+
+// ---- Export ----
+function exportData(format) {
+    const series = document.getElementById('seriesSelect').value;
+    if (!series) { alert('Select a series first'); return; }
+    window.open(`/api/export?series=${encodeURIComponent(series)}&format=${format}`, '_blank');
+}
+
+// ---- Helpers ----
+function formatTime(secs) {
+    const m = Math.floor(secs / 60);
+    const s = (secs % 60).toFixed(1);
+    return `${m}:${s.padStart(4, '0')}`;
+}
+
+function parseTime(str) {
+    const parts = str.split(':');
+    return parseFloat(parts[0]) * 60 + parseFloat(parts[1]);
+}
+
+init();
+</script>
+{% endblock %}

@@ -144,3 +144,40 @@ class DetectorRegistry:
 
         total = insert_detections_batch(conn, detection_rows)
         return total
+
+    def run_single_detector_on_batch(
+        self,
+        conn,
+        detector: Detector,
+        frames: list[dict],
+        frame_width: int,
+        frame_height: int,
+    ) -> int:
+        """Run a single detector on a batch of frames.
+
+        frames: list of dicts with keys 'id', 'file_path'
+        Returns total detections inserted.
+        """
+        frame_paths = [f["file_path"] for f in frames]
+        batch_results = self._run_detector_on_batch(
+            detector, frame_paths, frame_width, frame_height
+        )
+
+        detection_rows: list[dict] = []
+        for frame_info, results in zip(frames, batch_results):
+            for det in results:
+                detection_rows.append({
+                    "frame_id": frame_info["id"],
+                    "detector": det.detector,
+                    "label": det.label.lower(),
+                    "confidence": det.confidence,
+                    "bbox_x": det.bbox_x,
+                    "bbox_y": det.bbox_y,
+                    "bbox_w": det.bbox_w,
+                    "bbox_h": det.bbox_h,
+                    "pixel_area": det.pixel_area,
+                    "attributes": det.attributes or None,
+                })
+
+        total = insert_detections_batch(conn, detection_rows)
+        return total

@@ -47,6 +47,10 @@ VOCABULARY = [
     ("an ambulance", "ambulance", "vehicle", 3),
     ("a helicopter", "helicopter", "vehicle", 3),
     ("a boat or ship", "boat", "vehicle", 3),
+    ("an airplane or aircraft", "airplane", "vehicle", 3),
+    ("a train or subway", "train", "vehicle", 3),
+    ("a SUV or sports utility vehicle", "suv", "vehicle", 3),
+    ("an emergency vehicle with lights", "emergency_vehicle", "vehicle", 3),
 
     # ── INDOOR SPACES ───────────────────────────────────────────────────────
     ("an office room or workspace", "office", "scene", 1),
@@ -187,7 +191,7 @@ DEFAULT_THEMES = [
     {
         "name": "vehicles",
         "description": "All vehicle-related detections",
-        "labels": ["car", "truck", "bus", "van", "motorcycle", "bicycle", "taxi", "police_car", "ambulance", "boat"],
+        "labels": ["car", "truck", "bus", "van", "motorcycle", "bicycle", "taxi", "police_car", "ambulance", "boat", "helicopter", "airplane", "train", "suv", "emergency_vehicle"],
     },
     {
         "name": "people_action",

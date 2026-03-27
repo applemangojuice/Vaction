@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_file
 
 from vaction.config import VactionConfig, get_config
 from vaction.db import (
@@ -19,6 +19,8 @@ from vaction.db import (
     create_theme, update_theme, delete_theme, get_all_themes, get_theme_labels,
     get_clip_prompts, add_clip_prompt, delete_clip_prompt, toggle_clip_prompt,
     seed_default_clip_prompts, load_vocabulary_preset, seed_default_themes,
+    mark_frames_detected_batch, get_unprocessed_frames, get_all_series_frames,
+    clear_detection_progress, insert_detections_batch,
 )
 
 app = Flask(
@@ -136,6 +138,11 @@ def processing_page():
 @app.route("/faces")
 def faces_page():
     return render_template("faces.html")
+
+
+@app.route("/explorer")
+def explorer_page():
+    return render_template("explorer.html")
 
 
 # ── API: Status ──────────────────────────────────────────────────────────────
@@ -323,10 +330,11 @@ def api_detect():
 
                 _job_put(job_id, "status", "Models loaded. Querying frames...")
 
-                # If force mode, clear existing detections for this series first
+                series_id = row["id"]
+
+                # If force mode, clear existing detections and progress for this series
                 if force:
                     _job_put(job_id, "status", "Force mode: clearing existing detections...")
-                    # Get the specific detectors being re-run
                     conn.execute("""
                         DELETE FROM detection WHERE id IN (
                             SELECT d.id FROM detection d
@@ -339,6 +347,8 @@ def api_detect():
                     """.format(",".join("?" * len(detector_names))),
                         (series_name, *detector_names),
                     )
+                    for dn in detector_names:
+                        clear_detection_progress(conn, series_id, dn)
                     conn.commit()
 
                 # Count total frames for this series
@@ -346,82 +356,143 @@ def api_detect():
                     SELECT COUNT(*) as c FROM frame f
                     JOIN episode e ON f.episode_id = e.id
                     JOIN season s ON e.season_id = s.id
-                    JOIN series sr ON s.series_id = sr.id
-                    WHERE sr.name = ?
-                """, (series_name,)).fetchone()["c"]
+                    WHERE s.series_id = ?
+                """, (series_id,)).fetchone()["c"]
 
                 # Count frames with file paths
                 total_with_files = conn.execute("""
                     SELECT COUNT(*) as c FROM frame f
                     JOIN episode e ON f.episode_id = e.id
                     JOIN season s ON e.season_id = s.id
-                    JOIN series sr ON s.series_id = sr.id
-                    WHERE sr.name = ? AND f.file_path IS NOT NULL
-                """, (series_name,)).fetchone()["c"]
+                    WHERE s.series_id = ? AND f.file_path IS NOT NULL
+                """, (series_id,)).fetchone()["c"]
 
-                # Count already-detected frames
-                already_detected = conn.execute("""
-                    SELECT COUNT(DISTINCT f.id) as c FROM frame f
-                    JOIN detection d ON d.frame_id = f.id
-                    JOIN episode e ON f.episode_id = e.id
-                    JOIN season s ON e.season_id = s.id
-                    JOIN series sr ON s.series_id = sr.id
-                    WHERE sr.name = ?
-                """, (series_name,)).fetchone()["c"]
+                _job_put(job_id, "status", f"Series '{series_name}': {total_all} total frames, {total_with_files} with files")
 
-                _job_put(job_id, "status", f"Series '{series_name}': {total_all} total frames, {total_with_files} with files, {already_detected} already detected")
-
-                frames_query = """
-                    SELECT f.id, f.file_path, e.width, e.height
-                    FROM frame f
-                    JOIN episode e ON f.episode_id = e.id
-                    JOIN season s ON e.season_id = s.id
-                    JOIN series sr ON s.series_id = sr.id
-                    WHERE sr.name = ? AND f.file_path IS NOT NULL
-                """
-                params = [series_name]
-
-                if not force:
-                    frames_query += " AND f.id NOT IN (SELECT DISTINCT frame_id FROM detection)"
-
-                frames_query += " ORDER BY f.id"
-                frames = conn.execute(frames_query, params).fetchall()
-
-                if not frames:
-                    msg = "No unprocessed frames found."
-                    if already_detected > 0 and not force:
-                        msg += f" {already_detected} frames already detected. Enable 'Force re-detect' to re-run."
-                    elif total_with_files == 0:
-                        msg += f" {total_all} frames exist but none have file paths. Frame files may have been deleted."
-                    _job_put(job_id, "status", msg)
-                    _job_put(job_id, "complete", json.dumps({"total_detections": 0, "frames_processed": 0}))
-                    return
-
-                total_frames = len(frames)
-                _job_put(job_id, "status", f"Processing {total_frames} frames...")
+                # --- Per-detector processing with incremental CLIP support ---
                 total_detections = 0
+                total_frames_processed = 0
 
-                for i in range(0, total_frames, batch_size):
-                    batch = frames[i:i + batch_size]
-                    batch_dicts = [{"id": f["id"], "file_path": f["file_path"]} for f in batch]
-                    width = batch[0]["width"]
-                    height = batch[0]["height"]
+                for detector in registry._detectors:
+                    detector_name = detector.name
 
-                    count = registry.run_on_batch(conn, batch_dicts, width, height)
-                    total_detections += count
-                    conn.commit()
+                    if detector_name == "clip" and not force:
+                        # Incremental CLIP: only run new/changed prompts
+                        enabled_prompts = get_clip_prompts(conn, enabled_only=True)
+                        enabled_labels = {p["label"] for p in enabled_prompts}
 
-                    processed = min(i + batch_size, total_frames)
-                    _job_put(job_id, "progress", json.dumps({
-                        "processed": processed,
-                        "total": total_frames,
-                        "detections": total_detections,
-                        "pct": round(processed / total_frames * 100, 1),
-                    }))
+                        # Get CLIP labels already detected for this series
+                        existing_clip_labels = set(r["label"] for r in conn.execute("""
+                            SELECT DISTINCT d.label FROM detection d
+                            JOIN frame f ON d.frame_id = f.id
+                            JOIN episode e ON f.episode_id = e.id
+                            JOIN season s ON e.season_id = s.id
+                            WHERE s.series_id = ? AND d.detector = 'clip'
+                        """, (series_id,)).fetchall())
+
+                        new_prompts = [p for p in enabled_prompts if p["label"] not in existing_clip_labels]
+
+                        if not new_prompts:
+                            _job_put(job_id, "status", f"CLIP: all {len(enabled_prompts)} prompts already detected. Skipping.")
+                            continue
+
+                        _job_put(job_id, "status",
+                            f"CLIP incremental: {len(new_prompts)} new prompts to detect "
+                            f"(skipping {len(existing_clip_labels)} existing)")
+
+                        # Create a new CLIP detector with only the new prompts
+                        from vaction.detectors.clip import CLIPDetector
+                        clip_detector = CLIPDetector(
+                            model_name=config.clip_model, pretrained=config.clip_pretrained,
+                            device=dev, custom_prompts=new_prompts,
+                        )
+
+                        # For incremental CLIP, process ALL frames (new prompts on all frames)
+                        all_frames = get_all_series_frames(conn, series_id)
+                        if not all_frames:
+                            _job_put(job_id, "status", "CLIP: no frames with file paths found.")
+                            continue
+
+                        clip_total = len(all_frames)
+                        _job_put(job_id, "status",
+                            f"CLIP incremental: running {len(new_prompts)} new prompts on {clip_total} frames")
+
+                        for i in range(0, clip_total, batch_size):
+                            batch = all_frames[i:i + batch_size]
+                            batch_dicts = [{"id": f["id"], "file_path": f["file_path"]} for f in batch]
+                            width = batch[0]["width"]
+                            height = batch[0]["height"]
+
+                            count = registry.run_single_detector_on_batch(
+                                conn, clip_detector, batch_dicts, width, height)
+                            total_detections += count
+
+                            # Mark progress for new CLIP prompts
+                            batch_frame_ids = [f["id"] for f in batch]
+                            mark_frames_detected_batch(conn, series_id, "clip", batch_frame_ids)
+                            conn.commit()
+
+                            processed = min(i + batch_size, clip_total)
+                            total_frames_processed = processed
+                            _job_put(job_id, "progress", json.dumps({
+                                "processed": processed,
+                                "total": clip_total,
+                                "detections": total_detections,
+                                "pct": round(processed / clip_total * 100, 1),
+                                "detector": "clip",
+                            }))
+
+                    else:
+                        # YOLO/face/force-CLIP: use progress tracking to skip already-processed frames
+                        if force:
+                            frames = get_all_series_frames(conn, series_id)
+                        else:
+                            frames = get_unprocessed_frames(conn, series_id, detector_name)
+
+                        if not frames:
+                            _job_put(job_id, "status", f"{detector_name}: no unprocessed frames. Skipping.")
+                            continue
+
+                        det_total = len(frames)
+                        _job_put(job_id, "status", f"{detector_name}: processing {det_total} frames...")
+
+                        for i in range(0, det_total, batch_size):
+                            batch = frames[i:i + batch_size]
+                            batch_dicts = [{"id": f["id"], "file_path": f["file_path"]} for f in batch]
+                            width = batch[0]["width"]
+                            height = batch[0]["height"]
+
+                            count = registry.run_single_detector_on_batch(
+                                conn, detector, batch_dicts, width, height)
+                            total_detections += count
+
+                            # Mark progress
+                            batch_frame_ids = [f["id"] for f in batch]
+                            mark_frames_detected_batch(conn, series_id, detector_name, batch_frame_ids)
+                            conn.commit()
+
+                            processed = min(i + batch_size, det_total)
+                            _job_put(job_id, "progress", json.dumps({
+                                "processed": processed,
+                                "total": det_total,
+                                "detections": total_detections,
+                                "pct": round(processed / det_total * 100, 1),
+                                "detector": detector_name,
+                            }))
+
+                        total_frames_processed += det_total
+
+                if total_detections == 0 and total_frames_processed == 0:
+                    msg = "No unprocessed frames found."
+                    if total_with_files == 0:
+                        msg += f" {total_all} frames exist but none have file paths. Frame files may have been deleted."
+                    else:
+                        msg += " All frames already detected for all requested detectors. Enable 'Force re-detect' to re-run."
+                    _job_put(job_id, "status", msg)
 
                 _job_put(job_id, "complete", json.dumps({
                     "total_detections": total_detections,
-                    "frames_processed": total_frames,
+                    "frames_processed": total_frames_processed,
                 }))
             finally:
                 conn.close()
@@ -1090,6 +1161,9 @@ def api_faces_scan():
     series_name = data.get("series", "").strip()
     if not series_name:
         return jsonify({"error": "series is required"}), 400
+    resolution = data.get("resolution")
+    if resolution is not None:
+        resolution = int(resolution)
 
     job_id = f"facescan_{int(time.time())}"
     _job_queues[job_id] = queue.Queue()
@@ -1099,6 +1173,9 @@ def api_faces_scan():
     def run_facescan():
         try:
             import numpy as np
+            import cv2
+            from collections import defaultdict
+            from concurrent.futures import ThreadPoolExecutor
             config = get_app_config()
             conn = init_db(config.db_path)
             try:
@@ -1135,27 +1212,56 @@ def api_faces_scan():
                 detector = FaceDetector(device=config.device)
                 detector._ensure_model()
 
+                # Group detections by frame to avoid redundant image loads
+                frame_groups = defaultdict(list)
+                for det in face_dets:
+                    if det["file_path"] and det["bbox_x"] is not None:
+                        frame_groups[det["frame_id"]].append(det)
+
+                # Pre-load frame images in parallel (I/O-bound)
+                frame_paths = {fid: dets[0]["file_path"] for fid, dets in frame_groups.items()}
+
+                def load_frame(file_path):
+                    return cv2.imread(file_path)
+
+                _job_put(job_id, "status", f"Loading {len(frame_paths)} unique frames...")
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    loaded = dict(zip(frame_paths.keys(), pool.map(load_frame, frame_paths.values())))
+
                 embeddings = []
                 det_ids = []
                 det_infos = []
 
-                for i, det in enumerate(face_dets):
-                    if not det["file_path"] or det["bbox_x"] is None:
+                # Process one frame at a time: run InsightFace once per frame
+                for i, (frame_id, dets) in enumerate(frame_groups.items()):
+                    img = loaded.get(frame_id)
+                    if img is None:
                         continue
+
+                    # Optionally resize for speed
+                    scale = 1.0
+                    if resolution and resolution < img.shape[0]:
+                        scale = resolution / img.shape[0]
+                        img = cv2.resize(img, None, fx=scale, fy=scale)
+
                     try:
-                        import cv2
-                        img = cv2.imread(det["file_path"])
-                        if img is None:
-                            continue
                         faces = detector._app.get(img)
-                        # Find the face closest to our bbox
+                    except Exception:
+                        continue
+
+                    # Match each detection in this frame to the best InsightFace result
+                    for det in dets:
                         best_face = None
                         best_overlap = 0
+                        # Scale bbox coords if we resized
+                        bx = det["bbox_x"] * scale
+                        by = det["bbox_y"] * scale
+                        bw = det["bbox_w"] * scale
+                        bh = det["bbox_h"] * scale
                         for face in faces:
                             fx1, fy1, fx2, fy2 = face.bbox.astype(int)
-                            # Simple overlap check
-                            ox = max(0, min(fx2, det["bbox_x"] + det["bbox_w"]) - max(fx1, det["bbox_x"]))
-                            oy = max(0, min(fy2, det["bbox_y"] + det["bbox_h"]) - max(fy1, det["bbox_y"]))
+                            ox = max(0, min(fx2, bx + bw) - max(fx1, bx))
+                            oy = max(0, min(fy2, by + bh) - max(fy1, by))
                             overlap = ox * oy
                             if overlap > best_overlap and face.embedding is not None:
                                 best_overlap = overlap
@@ -1165,11 +1271,13 @@ def api_faces_scan():
                             embeddings.append(best_face.embedding.astype(np.float32))
                             det_ids.append(det["det_id"])
                             det_infos.append(det)
-                    except Exception:
-                        continue
 
-                    if (i + 1) % 50 == 0:
-                        _job_put(job_id, "progress", json.dumps({"processed": i + 1, "total": len(face_dets), "pct": round((i+1)/len(face_dets)*100, 1)}))
+                    if (i + 1) % 20 == 0:
+                        _job_put(job_id, "progress", json.dumps({
+                            "processed": i + 1, "total": len(frame_groups),
+                            "pct": round((i + 1) / len(frame_groups) * 100, 1),
+                            "embeddings": len(embeddings),
+                        }))
 
                 if not embeddings:
                     _job_put(job_id, "complete", json.dumps({"clusters": 0}))
@@ -1373,6 +1481,295 @@ def api_backups():
         {"path": str(b), "name": b.name, "size_mb": round(b.stat().st_size / 1024 / 1024, 2), "modified": b.stat().st_mtime}
         for b in backups
     ]})
+
+
+# ── API: Explorer ────────────────────────────────────────────────────────────
+
+
+@app.route("/api/explorer")
+def api_explorer():
+    """Browse detections with filtering and pagination."""
+    series_name = request.args.get("series", "").strip()
+    label = request.args.get("label", "").strip()
+    detector = request.args.get("detector", "").strip()
+    episode = request.args.get("episode", "").strip()
+    page = max(1, int(request.args.get("page", 1)))
+    per_page = min(200, max(1, int(request.args.get("per_page", 50))))
+
+    if not series_name:
+        return jsonify({"error": "series is required"}), 400
+
+    conn = get_db()
+    try:
+        sr = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not sr:
+            return jsonify({"error": f"Series '{series_name}' not found"}), 404
+
+        conditions = ["sn.series_id = ?"]
+        params: list = [sr["id"]]
+
+        if label:
+            conditions.append("d.label = ?")
+            params.append(label)
+        if detector and detector != "all":
+            conditions.append("d.detector = ?")
+            params.append(detector)
+        if episode:
+            ep_match = re.match(r"S(\d+)E(\d+)", episode, re.IGNORECASE)
+            if ep_match:
+                conditions.append("sn.number = ? AND e.number = ?")
+                params.append(int(ep_match.group(1)))
+                params.append(int(ep_match.group(2)))
+
+        where = " AND ".join(conditions)
+
+        count_sql = f"""
+            SELECT COUNT(*) as c
+            FROM detection d
+            JOIN frame f ON d.frame_id = f.id
+            JOIN episode e ON f.episode_id = e.id
+            JOIN season sn ON e.season_id = sn.id
+            WHERE {where}
+        """
+        total = conn.execute(count_sql, params).fetchone()["c"]
+
+        offset = (page - 1) * per_page
+        data_sql = f"""
+            SELECT d.id, d.frame_id, d.label, d.detector, d.confidence,
+                   d.bbox_x, d.bbox_y, d.bbox_w, d.bbox_h, d.pixel_area,
+                   sn.number as season_num, e.number as ep_num, e.title as episode_title,
+                   f.timestamp, f.file_path as frame_path
+            FROM detection d
+            JOIN frame f ON d.frame_id = f.id
+            JOIN episode e ON f.episode_id = e.id
+            JOIN season sn ON e.season_id = sn.id
+            WHERE {where}
+            ORDER BY sn.number, e.number, f.timestamp, d.id
+            LIMIT ? OFFSET ?
+        """
+        rows = conn.execute(data_sql, params + [per_page, offset]).fetchall()
+
+        detections = []
+        for r in rows:
+            detections.append({
+                "id": r["id"],
+                "frame_id": r["frame_id"],
+                "label": r["label"],
+                "detector": r["detector"],
+                "confidence": round(r["confidence"], 4),
+                "bbox_x": r["bbox_x"],
+                "bbox_y": r["bbox_y"],
+                "bbox_w": r["bbox_w"],
+                "bbox_h": r["bbox_h"],
+                "pixel_area": r["pixel_area"],
+                "episode_code": f"S{r['season_num']:02d}E{r['ep_num']:02d}",
+                "episode_title": r["episode_title"] or "",
+                "timestamp": round(r["timestamp"], 2),
+                "frame_path": r["frame_path"] or "",
+            })
+
+        pages = max(1, (total + per_page - 1) // per_page)
+        return jsonify({
+            "detections": detections,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": pages,
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/explorer/timeline")
+def api_explorer_timeline():
+    """Get timeline data for an episode: detection density in 5-second segments."""
+    series_name = request.args.get("series", "").strip()
+    episode_code = request.args.get("episode", "").strip()
+
+    if not series_name or not episode_code:
+        return jsonify({"error": "series and episode are required"}), 400
+
+    ep_match = re.match(r"S(\d+)E(\d+)", episode_code, re.IGNORECASE)
+    if not ep_match:
+        return jsonify({"error": "Invalid episode format, use S01E03"}), 400
+
+    season_num = int(ep_match.group(1))
+    ep_num = int(ep_match.group(2))
+
+    conn = get_db()
+    try:
+        sr = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not sr:
+            return jsonify({"error": f"Series '{series_name}' not found"}), 404
+
+        ep = conn.execute("""
+            SELECT e.id, e.duration_secs, e.fps_sampled
+            FROM episode e
+            JOIN season sn ON e.season_id = sn.id
+            WHERE sn.series_id = ? AND sn.number = ? AND e.number = ?
+        """, (sr["id"], season_num, ep_num)).fetchone()
+        if not ep:
+            return jsonify({"error": "Episode not found"}), 404
+
+        duration = ep["duration_secs"]
+        fps = ep["fps_sampled"]
+        segment_size = 5.0
+
+        dets = conn.execute("""
+            SELECT d.label, f.timestamp
+            FROM detection d
+            JOIN frame f ON d.frame_id = f.id
+            WHERE f.episode_id = ?
+            ORDER BY f.timestamp
+        """, (ep["id"],)).fetchall()
+
+        num_segments = max(1, int(duration / segment_size) + 1)
+        segments = []
+        label_set = set()
+
+        for i in range(num_segments):
+            seg_start = i * segment_size
+            seg_end = seg_start + segment_size
+            labels: dict[str, int] = {}
+            for d in dets:
+                if seg_start <= d["timestamp"] < seg_end:
+                    lbl = d["label"]
+                    labels[lbl] = labels.get(lbl, 0) + 1
+                    label_set.add(lbl)
+            density = sum(labels.values())
+            if density > 0:
+                segments.append({
+                    "start": round(seg_start, 1),
+                    "end": round(seg_end, 1),
+                    "labels": labels,
+                    "density": density,
+                })
+
+        palette = [
+            "#4a9eff", "#ff6b6b", "#51cf66", "#ffd43b", "#cc5de8",
+            "#ff922b", "#20c997", "#a9e34b", "#e599f7", "#74c0fc",
+            "#f06595", "#66d9e8", "#ffe066", "#c0eb75", "#b197fc",
+        ]
+        label_colors = {}
+        for i, lbl in enumerate(sorted(label_set)):
+            label_colors[lbl] = palette[i % len(palette)]
+
+        return jsonify({
+            "duration": duration,
+            "fps": fps,
+            "segments": segments,
+            "label_colors": label_colors,
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/explorer/frame/<int:frame_id>")
+def api_explorer_frame(frame_id):
+    """Serve the full frame image."""
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT file_path FROM frame WHERE id = ?", (frame_id,)).fetchone()
+        if not row or not row["file_path"] or not Path(row["file_path"]).exists():
+            return "Not found", 404
+        return send_file(row["file_path"], mimetype="image/jpeg")
+    finally:
+        conn.close()
+
+
+@app.route("/api/explorer/labels")
+def api_explorer_labels():
+    """Get all distinct labels for a series."""
+    series_name = request.args.get("series", "").strip()
+    if not series_name:
+        return jsonify({"labels": []})
+    conn = get_db()
+    try:
+        sr = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not sr:
+            return jsonify({"labels": []})
+        rows = conn.execute("""
+            SELECT DISTINCT d.label
+            FROM detection d
+            JOIN frame f ON d.frame_id = f.id
+            JOIN episode e ON f.episode_id = e.id
+            JOIN season sn ON e.season_id = sn.id
+            WHERE sn.series_id = ?
+            ORDER BY d.label
+        """, (sr["id"],)).fetchall()
+        return jsonify({"labels": [r["label"] for r in rows]})
+    finally:
+        conn.close()
+
+
+@app.route("/api/export")
+def api_export():
+    """Export all detections for a series as CSV or JSON."""
+    series_name = request.args.get("series", "").strip()
+    fmt = request.args.get("format", "csv").strip().lower()
+
+    if not series_name:
+        return jsonify({"error": "series is required"}), 400
+
+    conn = get_db()
+    try:
+        sr = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not sr:
+            return jsonify({"error": f"Series '{series_name}' not found"}), 404
+
+        rows = conn.execute("""
+            SELECT d.id, d.frame_id, d.label, d.detector, d.confidence,
+                   d.bbox_x, d.bbox_y, d.bbox_w, d.bbox_h, d.pixel_area,
+                   sn.number as season_num, e.number as ep_num, e.title as episode_title,
+                   f.timestamp, f.file_path as frame_path
+            FROM detection d
+            JOIN frame f ON d.frame_id = f.id
+            JOIN episode e ON f.episode_id = e.id
+            JOIN season sn ON e.season_id = sn.id
+            WHERE sn.series_id = ?
+            ORDER BY sn.number, e.number, f.timestamp, d.id
+        """, (sr["id"],)).fetchall()
+
+        data = []
+        for r in rows:
+            data.append({
+                "id": r["id"],
+                "frame_id": r["frame_id"],
+                "label": r["label"],
+                "detector": r["detector"],
+                "confidence": round(r["confidence"], 4),
+                "bbox_x": r["bbox_x"],
+                "bbox_y": r["bbox_y"],
+                "bbox_w": r["bbox_w"],
+                "bbox_h": r["bbox_h"],
+                "pixel_area": r["pixel_area"],
+                "episode_code": f"S{r['season_num']:02d}E{r['ep_num']:02d}",
+                "episode_title": r["episode_title"] or "",
+                "timestamp": round(r["timestamp"], 2),
+            })
+
+        if fmt == "json":
+            return Response(
+                json.dumps(data, indent=2),
+                mimetype="application/json",
+                headers={"Content-Disposition": f"attachment; filename={series_name}_detections.json"},
+            )
+        else:
+            import csv
+            import io
+            output = io.StringIO()
+            if data:
+                writer = csv.DictWriter(output, fieldnames=data[0].keys())
+                writer.writeheader()
+                writer.writerows(data)
+            csv_str = output.getvalue()
+            return Response(
+                csv_str,
+                mimetype="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={series_name}_detections.csv"},
+            )
+    finally:
+        conn.close()
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
@@ -130,6 +131,17 @@ CREATE INDEX IF NOT EXISTS idx_episode_season ON episode(season_id);
 CREATE INDEX IF NOT EXISTS idx_theme_tag_label ON theme_tag(label);
 CREATE INDEX IF NOT EXISTS idx_face_cluster_series ON face_cluster(series_id);
 CREATE INDEX IF NOT EXISTS idx_face_cluster_member_cluster ON face_cluster_member(cluster_id);
+
+CREATE TABLE IF NOT EXISTS detection_progress (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_id   INTEGER NOT NULL REFERENCES series(id),
+    detector    TEXT NOT NULL,
+    frame_id    INTEGER NOT NULL REFERENCES frame(id),
+    completed_at REAL NOT NULL,
+    UNIQUE(series_id, detector, frame_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_detection_progress_lookup ON detection_progress(series_id, detector);
 """
 
 
@@ -408,3 +420,54 @@ def seed_default_themes(conn: sqlite3.Connection) -> int:
         create_theme(conn, t["name"], t["description"], t["labels"])
         created += 1
     return created
+
+
+# --- Detection progress helpers ---
+
+def mark_frame_detected(conn: sqlite3.Connection, series_id: int, detector: str, frame_id: int) -> None:
+    """Record that a frame has been processed by a given detector."""
+    conn.execute(
+        "INSERT OR IGNORE INTO detection_progress (series_id, detector, frame_id, completed_at) VALUES (?, ?, ?, ?)",
+        (series_id, detector, frame_id, time.time()),
+    )
+
+
+def mark_frames_detected_batch(conn: sqlite3.Connection, series_id: int, detector: str, frame_ids: list[int]) -> None:
+    """Batch-mark multiple frames as processed by a given detector."""
+    if not frame_ids:
+        return
+    conn.executemany(
+        "INSERT OR IGNORE INTO detection_progress (series_id, detector, frame_id, completed_at) VALUES (?, ?, ?, ?)",
+        [(series_id, detector, fid, time.time()) for fid in frame_ids],
+    )
+
+
+def get_unprocessed_frames(conn: sqlite3.Connection, series_id: int, detector: str) -> list[sqlite3.Row]:
+    """Get frames not yet processed by this detector for a given series."""
+    return conn.execute("""
+        SELECT f.id, f.file_path, e.width, e.height FROM frame f
+        JOIN episode e ON f.episode_id = e.id
+        JOIN season s ON e.season_id = s.id
+        WHERE s.series_id = ? AND f.file_path IS NOT NULL
+        AND f.id NOT IN (SELECT frame_id FROM detection_progress WHERE series_id = ? AND detector = ?)
+        ORDER BY f.id
+    """, (series_id, series_id, detector)).fetchall()
+
+
+def get_all_series_frames(conn: sqlite3.Connection, series_id: int) -> list[sqlite3.Row]:
+    """Get all frames with file paths for a series."""
+    return conn.execute("""
+        SELECT f.id, f.file_path, e.width, e.height FROM frame f
+        JOIN episode e ON f.episode_id = e.id
+        JOIN season s ON e.season_id = s.id
+        WHERE s.series_id = ? AND f.file_path IS NOT NULL
+        ORDER BY f.id
+    """, (series_id,)).fetchall()
+
+
+def clear_detection_progress(conn: sqlite3.Connection, series_id: int, detector: str) -> None:
+    """Clear progress tracking for a detector on a series (used in force mode)."""
+    conn.execute(
+        "DELETE FROM detection_progress WHERE series_id = ? AND detector = ?",
+        (series_id, detector),
+    )
