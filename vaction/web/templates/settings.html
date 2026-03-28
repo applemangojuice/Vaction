@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block title %}Settings — Vaction{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+<p class="subtitle">Vocabulary, themes, face clusters, and system status</p>
+
+<div class="tab-bar">
+    <button class="active" onclick="switchTab('vocab')">Vocabulary</button>
+    <button onclick="switchTab('themes')">Themes</button>
+    <button onclick="switchTab('status')">Status</button>
+</div>
+
+<!-- ═══ VOCABULARY TAB ═══ -->
+<div id="tab-vocab" class="tab-content active">
+    <div class="card">
+        <h2>Presets</h2>
+        <p class="text-sm text-muted mb-16">Load a curated set of CLIP detection prompts. This replaces all existing prompts.</p>
+        <div class="flex gap-8">
+            <button class="btn btn-secondary" onclick="loadPreset(1)">Low <span class="text-xs text-muted" id="presetLow"></span></button>
+            <button class="btn btn-secondary" onclick="loadPreset(2)">Medium <span class="text-xs text-muted" id="presetMed"></span></button>
+            <button class="btn btn-secondary" onclick="loadPreset(3)">High <span class="text-xs text-muted" id="presetHigh"></span></button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Add Prompt</h2>
+        <div class="row">
+            <div class="form-group"><label>Prompt</label><input type="text" id="vpPrompt" placeholder="a red car driving" /></div>
+            <div class="form-group"><label>Label</label><input type="text" id="vpLabel" placeholder="red_car" /></div>
+            <div class="form-group">
+                <label>Category</label>
+                <select id="vpCategory">
+                    <option value="scene">Scene</option>
+                    <option value="object">Object</option>
+                    <option value="attribute">Attribute</option>
+                    <option value="action">Action</option>
+                    <option value="custom">Custom</option>
+                </select>
+            </div>
+            <div class="form-group" style="flex:0 0 auto;"><label>&nbsp;</label><button class="btn btn-sm" onclick="addPrompt()">Add</button></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Current Vocabulary</h2>
+        <div id="vocabList">Loading...</div>
+    </div>
+</div>
+
+<!-- ═��═ THEMES TAB ═══ -->
+<div id="tab-themes" class="tab-content">
+    <div class="card">
+        <h2>Create Theme</h2>
+        <div class="row">
+            <div class="form-group"><label>Name</label><input type="text" id="themeName" placeholder="vehicles" /></div>
+            <div class="form-group"><label>Description</label><input type="text" id="themeDesc" placeholder="All vehicle types" /></div>
+        </div>
+        <div class="form-group">
+            <label>Labels (comma-separated)</label>
+            <input type="text" id="themeLabels" placeholder="car, truck, bus, motorcycle" />
+        </div>
+        <div id="themeHints" class="pill-row mb-16"></div>
+        <button class="btn btn-sm" onclick="createTheme()">Create Theme</button>
+    </div>
+
+    <div class="card">
+        <h2>Existing Themes</h2>
+        <div id="themeList">Loading...</div>
+    </div>
+</div>
+
+<!-- ═══ STATUS TAB ═══ -->
+<div id="tab-status" class="tab-content">
+    <div class="card">
+        <h2>Data Storage</h2>
+        <div id="storageInfo" class="text-sm text-muted">Loading...</div>
+        <div class="flex gap-8 mt-16">
+            <button class="btn btn-secondary btn-sm" onclick="createBackup()">Create Backup</button>
+        </div>
+        <div id="backupResult" class="mt-8"></div>
+    </div>
+
+    <div class="card">
+        <h2>Series Overview</h2>
+        <div id="seriesOverview">Loading...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-bar button').forEach(el => el.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    event.target.classList.add('active');
+}
+
+// ── Vocabulary ──
+function loadVocab() {
+    fetch('/api/vocabulary').then(r=>r.json()).then(data => {
+        const grouped = {};
+        (data.prompts||[]).forEach(p => {
+            if (!grouped[p.category]) grouped[p.category] = [];
+            grouped[p.category].push(p);
+        });
+        const el = document.getElementById('vocabList');
+        let html = '';
+        Object.entries(grouped).sort().forEach(([cat, prompts]) => {
+            html += `<h3 class="mt-16">${cat}</h3><table><thead><tr><th>Prompt</th><th>Label</th><th>Enabled</th><th></th></tr></thead><tbody>`;
+            prompts.forEach(p => {
+                html += `<tr style="opacity:${p.enabled ? 1 : 0.4};">
+                    <td>${p.prompt}</td><td><span class="tag">${p.label}</span></td>
+                    <td><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePrompt(${p.id},this.checked)"></td>
+                    <td><button class="btn btn-sm btn-danger" onclick="deletePrompt(${p.id})">Delete</button></td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        });
+        el.innerHTML = html || '<p class="text-muted">No prompts configured.</p>';
+    });
+}
+loadVocab();
+
+function addPrompt() {
+    const prompt = document.getElementById('vpPrompt').value.trim();
+    const label = document.getElementById('vpLabel').value.trim();
+    const category = document.getElementById('vpCategory').value;
+    if (!prompt || !label) return;
+    fetch('/api/vocabulary', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({prompt,label,category})})
+    .then(r=>r.json()).then(() => { loadVocab(); document.getElementById('vpPrompt').value=''; document.getElementById('vpLabel').value=''; });
+}
+function togglePrompt(id, enabled) {
+    fetch(`/api/vocabulary/${id}/toggle`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
+}
+function deletePrompt(id) {
+    fetch(`/api/vocabulary/${id}`, {method:'DELETE'}).then(() => loadVocab());
+}
+function loadPreset(level) {
+    if (!confirm('This replaces all current prompts. Continue?')) return;
+    fetch('/api/vocabulary/preset', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({level})})
+    .then(r=>r.json()).then(d => { loadVocab(); alert(`Loaded ${d.loaded} prompts.`); });
+}
+fetch('/api/vocabulary/counts').then(r=>r.json()).then(d => {
+    if (d[1]) document.getElementById('presetLow').textContent = `(${d[1]})`;
+    if (d[2]) document.getElementById('presetMed').textContent = `(${d[2]})`;
+    if (d[3]) document.getElementById('presetHigh').textContent = `(${d[3]})`;
+});
+
+// ── Themes ──
+function loadThemes() {
+    fetch('/api/themes').then(r=>r.json()).then(data => {
+        const el = document.getElementById('themeList');
+        if (!data.themes || !data.themes.length) { el.innerHTML = '<p class="text-muted">No themes yet.</p>'; return; }
+        let html = '<table><thead><tr><th>Name</th><th>Description</th><th>Labels</th><th></th></tr></thead><tbody>';
+        data.themes.forEach(t => {
+            html += `<tr>
+                <td style="font-weight:500;">${t.name}</td>
+                <td class="text-muted">${t.description||''}</td>
+                <td>${t.labels.map(l=>`<span class="tag" style="margin:2px;">${l}</span>`).join(' ')}</td>
+                <td><button class="btn btn-sm btn-danger" onclick="deleteTheme(${t.id})">Delete</button></td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+        el.innerHTML = html;
+    });
+    // Load label hints
+    fetch('/api/labels').then(r=>r.json()).then(data => {
+        const el = document.getElementById('themeHints');
+        el.innerHTML = (data.labels||[]).slice(0, 30).map(l =>
+            `<span class="pill" onclick="addThemeLabel('${l.label}')">${l.label}</span>`
+        ).join('');
+    });
+}
+loadThemes();
+
+function addThemeLabel(label) {
+    const el = document.getElementById('themeLabels');
+    const existing = el.value.split(',').map(s=>s.trim()).filter(Boolean);
+    if (!existing.includes(label)) {
+        existing.push(label);
+        el.value = existing.join(', ');
+    }
+}
+function createTheme() {
+    const name = document.getElementById('themeName').value.trim();
+    const description = document.getElementById('themeDesc').value.trim();
+    const labels = document.getElementById('themeLabels').value.split(',').map(s=>s.trim()).filter(Boolean);
+    if (!name || !labels.length) return;
+    fetch('/api/themes', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,description,labels})})
+    .then(r=>r.json()).then(() => { loadThemes(); document.getElementById('themeName').value=''; document.getElementById('themeDesc').value=''; document.getElementById('themeLabels').value=''; });
+}
+function deleteTheme(id) {
+    if (!confirm('Delete this theme?')) return;
+    fetch(`/api/themes/${id}`, {method:'DELETE'}).then(() => loadThemes());
+}
+
+// ── Status ──
+function loadStatus() {
+    fetch('/api/data-info').then(r=>r.json()).then(d => {
+        document.getElementById('storageInfo').innerHTML = `
+            <div class="grid-3">
+                <div><div class="stat-value" style="font-size:20px;">${d.db_size_mb} MB</div><div class="stat-label">Database</div></div>
+                <div><div class="stat-value" style="font-size:20px;">${d.frames_size_mb} MB</div><div class="stat-label">Frames</div></div>
+                <div><div class="stat-value" style="font-size:20px;">${d.total_size_mb} MB</div><div class="stat-label">Total</div></div>
+            </div>
+            <p class="text-xs text-muted mt-8">${d.data_dir}</p>`;
+    });
+    fetch('/api/status').then(r=>r.json()).then(data => {
+        const el = document.getElementById('seriesOverview');
+        if (!data.series || !data.series.length) { el.innerHTML = '<p class="text-muted">No series yet.</p>'; return; }
+        let html = '';
+        data.series.forEach(s => {
+            html += `<div class="card-flat mb-8"><h3 style="text-transform:none;">${s.name}</h3>
+                <div class="grid-4 mt-8">
+                    <div><span class="stat-value" style="font-size:18px;">${s.total_episodes}</span><div class="stat-label">Episodes</div></div>
+                    <div><span class="stat-value" style="font-size:18px;">${s.total_frames.toLocaleString()}</span><div class="stat-label">Frames</div></div>
+                    <div><span class="stat-value" style="font-size:18px;">${s.total_detections.toLocaleString()}</span><div class="stat-label">Detections</div></div>
+                    <div><span class="stat-value" style="font-size:18px;">${s.total_frames > 0 ? (s.total_detections/s.total_frames).toFixed(1) : '0'}</span><div class="stat-label">Avg/Frame</div></div>
+                </div>
+            </div>`;
+        });
+        el.innerHTML = html;
+    });
+}
+loadStatus();
+
+function createBackup() {
+    fetch('/api/backup', {method:'POST'}).then(r=>r.json()).then(d => {
+        document.getElementById('backupResult').innerHTML = d.ok
+            ? `<span class="tag tag-green">Backup created (${d.size_mb} MB)</span>`
+            : `<span class="tag" style="background:rgba(255,69,58,0.12);color:#ff453a;">Error: ${d.error}</span>`;
+    });
+}
+</script>
+{% endblock %}

@@ -1,0 +1,343 @@
+{% extends "base.html" %}
+{% block title %}Content — Vaction{% endblock %}
+{% block content %}
+<h1>Content</h1>
+<p class="subtitle">Add videos, run detection, and process faces</p>
+
+<div class="tab-bar">
+    <button class="active" onclick="switchTab('ingest')">Add Videos</button>
+    <button onclick="switchTab('detect')">Run Detection</button>
+    <button onclick="switchTab('faces')">Face Clustering</button>
+</div>
+
+<!-- ═══ ADD VIDEOS TAB ═══ -->
+<div id="tab-ingest" class="tab-content active">
+    <div class="card">
+        <div class="grid-2 gap-24">
+            <div>
+                <div class="form-group">
+                    <label>Folder Path</label>
+                    <div class="row">
+                        <div class="form-group" style="flex:1;"><input type="text" id="folderPath" placeholder="/Users/you/Videos/Season 1" /></div>
+                        <div class="form-group" style="flex:0 0 auto;"><button class="btn btn-secondary btn-sm" onclick="openBrowser()">Browse</button></div>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="form-group">
+                        <label>Series</label>
+                        <select id="seriesMode" onchange="toggleSeriesInput()">
+                            <option value="new">New Series</option>
+                            <option value="existing">Existing Series</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="newSeriesGroup">
+                        <label>Name</label>
+                        <input type="text" id="newSeriesName" placeholder="e.g. Severance" />
+                    </div>
+                    <div class="form-group hidden" id="existingSeriesGroup">
+                        <label>Existing</label>
+                        <select id="existingSeriesSelect"><option value="">Loading...</option></select>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="form-group">
+                        <label>Frame Rate</label>
+                        <select id="fps">
+                            <option value="1">1 fps</option>
+                            <option value="2" selected>2 fps</option>
+                            <option value="5">5 fps</option>
+                            <option value="10">10 fps</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Transcode</label>
+                        <select id="transcode">
+                            <option value="">Original</option>
+                            <option value="480">480p</option>
+                            <option value="720">720p</option>
+                            <option value="1080">1080p</option>
+                        </select>
+                    </div>
+                </div>
+                <button class="btn btn-green mt-16" id="ingestBtn" onclick="startIngest()">Start Ingest</button>
+            </div>
+            <div>
+                <!-- File browser -->
+                <div id="browserPanel" class="hidden" style="height:100%;">
+                    <div class="flex items-center justify-between mb-8">
+                        <span class="text-xs text-muted truncate" id="browserPath" style="max-width:280px;">/</span>
+                        <button class="btn btn-secondary btn-sm" onclick="browserUp()">&uarr; Up</button>
+                    </div>
+                    <div id="browserEntries" style="max-height:300px; overflow-y:auto; background:rgba(0,0,0,0.2); border-radius:10px; padding:8px;"></div>
+                    <div class="flex gap-8 mt-8">
+                        <button class="btn btn-sm" onclick="selectCurrentFolder()">Select Folder</button>
+                        <button class="btn btn-secondary btn-sm" onclick="closeBrowser()">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ DETECTION TAB ═══ -->
+<div id="tab-detect" class="tab-content">
+    <div class="card">
+        <div class="row">
+            <div class="form-group">
+                <label>Series</label>
+                <select id="detectSeries" onchange="loadDetectInfo()"><option value="">Select...</option></select>
+            </div>
+            <div class="form-group">
+                <label>Detectors</label>
+                <select id="detectDetectors">
+                    <option value="yolo,clip">YOLO + CLIP</option>
+                    <option value="yolo">YOLO only</option>
+                    <option value="clip">CLIP only</option>
+                    <option value="face">Face only</option>
+                    <option value="yolo,clip,face">All</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Batch Size</label>
+                <select id="detectBatch">
+                    <option value="8">8</option>
+                    <option value="16">16</option>
+                    <option value="32" selected>32</option>
+                    <option value="64">64</option>
+                </select>
+            </div>
+        </div>
+        <div id="detectInfo" class="text-sm text-muted mt-8"></div>
+        <div class="flex items-center gap-16 mt-16">
+            <button class="btn" id="detectBtn" onclick="startDetect()">Start Detection</button>
+            <label style="display:inline-flex;align-items:center;gap:6px;text-transform:none;color:rgba(255,255,255,0.5);font-size:13px;cursor:pointer;">
+                <input type="checkbox" id="detectForce"> Force re-detect
+            </label>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ FACES TAB ═══ -->
+<div id="tab-faces" class="tab-content">
+    <div class="card">
+        <div class="row">
+            <div class="form-group">
+                <label>Series</label>
+                <select id="faceSeries" onchange="loadFaces()"><option value="">Select...</option></select>
+            </div>
+            <div class="form-group" style="flex:0 0 auto;">
+                <label>&nbsp;</label>
+                <button class="btn" id="faceScanBtn" onclick="startFaceScan()">Scan &amp; Cluster Faces</button>
+            </div>
+        </div>
+        <p class="text-xs text-muted mt-8">Run detection (with Face detector) first, then cluster here.</p>
+    </div>
+    <div id="faceGallery" class="mt-16"></div>
+</div>
+
+<!-- ═══ ACTIVE JOBS (always visible) ═══ -->
+<div id="activeJobs" class="mt-24"></div>
+
+<!-- ═══ JOB LOG PANEL ═══ -->
+<div class="card hidden mt-16" id="jobLogCard">
+    <div class="flex items-center justify-between mb-8">
+        <h2 style="margin:0;">Job Log</h2>
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('jobLogCard').classList.add('hidden')">Close</button>
+    </div>
+    <div class="progress-bar progress-bar-lg"><div class="fill" id="jobProgressFill"></div></div>
+    <div class="log mt-8" id="jobLogOutput"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── State ──
+let currentBrowserPath = '';
+let activeStreams = {};
+
+// ── Tab switching ──
+function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-bar button').forEach(el => el.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    event.target.classList.add('active');
+}
+
+// ── Load series into all selectors ──
+function loadAllSeries() {
+    fetch('/api/series').then(r=>r.json()).then(data => {
+        ['detectSeries','faceSeries','existingSeriesSelect'].forEach(id => {
+            const sel = document.getElementById(id);
+            if (id === 'existingSeriesSelect') {
+                sel.innerHTML = '';
+            } else {
+                sel.innerHTML = '<option value="">Select...</option>';
+            }
+            (data.series||[]).forEach(s => {
+                sel.innerHTML += `<option value="${s.name}">${s.name}</option>`;
+            });
+        });
+    });
+}
+loadAllSeries();
+
+function toggleSeriesInput() {
+    const mode = document.getElementById('seriesMode').value;
+    document.getElementById('newSeriesGroup').classList.toggle('hidden', mode !== 'new');
+    document.getElementById('existingSeriesGroup').classList.toggle('hidden', mode !== 'existing');
+}
+function getSeriesName() {
+    const mode = document.getElementById('seriesMode').value;
+    return mode === 'new' ? document.getElementById('newSeriesName').value.trim() : document.getElementById('existingSeriesSelect').value;
+}
+
+// ── File browser ──
+function openBrowser() {
+    const current = document.getElementById('folderPath').value.trim() || '~';
+    document.getElementById('browserPanel').classList.remove('hidden');
+    browseTo(current);
+}
+function closeBrowser() { document.getElementById('browserPanel').classList.add('hidden'); }
+function browseTo(path) {
+    fetch('/api/browse?path=' + encodeURIComponent(path)).then(r=>r.json()).then(data => {
+        if (data.error) return;
+        currentBrowserPath = data.path;
+        document.getElementById('browserPath').textContent = data.path;
+        const el = document.getElementById('browserEntries');
+        el.innerHTML = '';
+        data.entries.filter(e => e.is_dir).forEach(entry => {
+            const div = document.createElement('div');
+            div.style.cssText = 'padding:6px 10px;cursor:pointer;border-radius:8px;font-size:13px;color:rgba(255,255,255,0.7);';
+            div.textContent = entry.name + '/';
+            div.onmouseover = () => div.style.background = 'rgba(255,255,255,0.06)';
+            div.onmouseout = () => div.style.background = 'transparent';
+            div.onclick = () => browseTo(entry.path);
+            el.appendChild(div);
+        });
+        data.entries.filter(e => !e.is_dir && /\.(mp4|mkv|avi|mov|m4v|ts|webm)$/i.test(e.name)).forEach(entry => {
+            const div = document.createElement('div');
+            const size = entry.size ? (entry.size / 1024 / 1024).toFixed(0) + ' MB' : '';
+            div.style.cssText = 'padding:6px 10px;font-size:12px;color:rgba(255,255,255,0.3);';
+            div.textContent = entry.name + (size ? '  (' + size + ')' : '');
+            el.appendChild(div);
+        });
+    });
+}
+function browserUp() {
+    fetch('/api/browse?path=' + encodeURIComponent(currentBrowserPath)).then(r=>r.json()).then(data => {
+        if (data.parent) browseTo(data.parent);
+    });
+}
+function selectCurrentFolder() {
+    document.getElementById('folderPath').value = currentBrowserPath;
+    closeBrowser();
+}
+
+// ── Job log ──
+function jobLog(msg, cls) {
+    const el = document.getElementById('jobLogOutput');
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = msg;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+}
+function showJobLog(jobId) {
+    const card = document.getElementById('jobLogCard');
+    card.classList.remove('hidden');
+    document.getElementById('jobLogOutput').innerHTML = '';
+    document.getElementById('jobProgressFill').style.width = '0%';
+    if (activeStreams[jobId]) return;
+    const evtSource = new EventSource('/api/jobs/' + jobId + '/stream');
+    activeStreams[jobId] = evtSource;
+    evtSource.addEventListener('status', e => jobLog(e.data, 'info'));
+    evtSource.addEventListener('progress', e => {
+        const d = JSON.parse(e.data);
+        if (d.pct) document.getElementById('jobProgressFill').style.width = d.pct + '%';
+        if (d.processed && d.total) jobLog(`${d.processed}/${d.total} frames` + (d.detections !== undefined ? `, ${d.detections} detections` : ''));
+    });
+    evtSource.addEventListener('complete', e => {
+        jobLog('Complete!', 'info');
+        document.getElementById('jobProgressFill').style.width = '100%';
+        evtSource.close(); delete activeStreams[jobId];
+        loadAllSeries();
+    });
+    evtSource.addEventListener('error', e => {
+        if (e.data) jobLog('Error: ' + e.data, 'error');
+        evtSource.close(); delete activeStreams[jobId];
+    });
+}
+
+// ── Start ingest ──
+function startIngest() {
+    const path = document.getElementById('folderPath').value.trim();
+    const series = getSeriesName();
+    const fps = document.getElementById('fps').value;
+    const transcode = document.getElementById('transcode').value || null;
+    if (!path || !series) { alert('Enter folder path and series name.'); return; }
+    fetch('/api/ingest', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({path, series, fps: parseFloat(fps), transcode}),
+    }).then(r=>r.json()).then(data => {
+        if (data.error) { alert(data.error); return; }
+        showJobLog(data.job_id);
+    });
+}
+
+// ── Start detection ──
+function loadDetectInfo() {
+    const series = document.getElementById('detectSeries').value;
+    if (!series) { document.getElementById('detectInfo').textContent = ''; return; }
+    fetch('/api/status').then(r=>r.json()).then(data => {
+        const s = data.series.find(x => x.name === series);
+        if (s) document.getElementById('detectInfo').textContent = `${s.total_episodes} episodes, ${s.total_frames.toLocaleString()} frames, ${s.total_detections.toLocaleString()} detections`;
+    });
+}
+function startDetect() {
+    const series = document.getElementById('detectSeries').value;
+    if (!series) { alert('Select a series.'); return; }
+    fetch('/api/detect', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+            series, detectors: document.getElementById('detectDetectors').value,
+            batch_size: parseInt(document.getElementById('detectBatch').value),
+            force: document.getElementById('detectForce').checked,
+        }),
+    }).then(r=>r.json()).then(data => {
+        if (data.error) { alert(data.error); return; }
+        showJobLog(data.job_id);
+    });
+}
+
+// ── Face scan ──
+function startFaceScan() {
+    const series = document.getElementById('faceSeries').value;
+    if (!series) { alert('Select a series.'); return; }
+    fetch('/api/faces/scan', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({series}),
+    }).then(r=>r.json()).then(data => {
+        if (data.error) { alert(data.error); return; }
+        showJobLog(data.job_id);
+    });
+}
+function loadFaces() {
+    const series = document.getElementById('faceSeries').value;
+    if (!series) { document.getElementById('faceGallery').innerHTML = ''; return; }
+    fetch('/api/faces?series=' + encodeURIComponent(series)).then(r=>r.json()).then(data => {
+        const el = document.getElementById('faceGallery');
+        if (!data.clusters || !data.clusters.length) { el.innerHTML = '<p class="text-muted text-sm">No face clusters yet.</p>'; return; }
+        el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:16px;">' + data.clusters.map(c => {
+            const thumbUrl = c.thumbnail_frame_id ? `/api/faces/frame/${c.thumbnail_frame_id}?bbox=${encodeURIComponent(JSON.stringify(c.thumbnail_bbox||{}))}` : '';
+            return `<div class="card-flat text-center" style="width:120px;padding:12px;">
+                <div style="width:80px;height:80px;margin:0 auto 8px;border-radius:50%;overflow:hidden;background:rgba(255,255,255,0.06);">
+                    ${thumbUrl ? `<img src="${thumbUrl}" style="width:100%;height:100%;object-fit:cover;">` : ''}
+                </div>
+                <div class="text-sm">${c.name}</div>
+                <div class="text-xs text-muted">${c.member_count} faces</div>
+            </div>`;
+        }).join('') + '</div>';
+    });
+}
+</script>
+{% endblock %}

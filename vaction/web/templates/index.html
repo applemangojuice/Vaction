@@ -1,73 +1,56 @@
 {% extends "base.html" %}
 {% block title %}Vaction — Home{% endblock %}
 {% block content %}
-<h1>Vaction</h1>
-<p class="subtitle">Local video object categorization, indexing, and search over TV episodes</p>
+<div style="padding-top:24px;">
+    <h1>Vaction</h1>
+    <p class="subtitle">Video Analysis & Content Tracking</p>
 
-<div class="grid-2">
-    <a href="/add-videos" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Add Videos</h2>
-        <p style="color:#666; font-size:14px;">Import episode files, browse folders, extract frames</p>
-    </a>
-    <a href="/detect" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Run Detection</h2>
-        <p style="color:#666; font-size:14px;">Run object, scene, and face detection on frames</p>
-    </a>
-    <a href="/vocabulary" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Vocabulary</h2>
-        <p style="color:#666; font-size:14px;">Configure what CLIP searches for — add custom prompts</p>
-    </a>
-    <a href="/themes" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Themes</h2>
-        <p style="color:#666; font-size:14px;">Group tags into named themes for combined analysis</p>
-    </a>
-    <a href="/search" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Search</h2>
-        <p style="color:#666; font-size:14px;">Query terms, view pixel-time %, chart trends</p>
-    </a>
-    <a href="/charts" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Advanced Charts</h2>
-        <p style="color:#666; font-size:14px;">Plotly-powered: stacked bars, 100% stacked, heatmaps, theme breakdowns</p>
-    </a>
-    <a href="/insights" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Insights</h2>
-        <p style="color:#666; font-size:14px;">Auto-generated analysis: trends, spikes, complexity, narrative</p>
-    </a>
-    <a href="/processing" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Processing</h2>
-        <p style="color:#666; font-size:14px;">Run parallel jobs, monitor all active processing</p>
-    </a>
-    <a href="/explorer" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Data Explorer</h2>
-        <p style="color:#666; font-size:14px;">Browse detections, preview frames, color-coded timeline</p>
-    </a>
-    <a href="/faces" class="card" style="text-decoration:none; color:inherit;">
-        <h2>Faces</h2>
-        <p style="color:#666; font-size:14px;">Detect, cluster, and label faces — view by character</p>
-    </a>
+    <div id="stats" class="grid-4 mb-24" style="display:none;">
+        <div class="card-flat text-center">
+            <div class="stat-value" id="statSeries">0</div>
+            <div class="stat-label">Series</div>
+        </div>
+        <div class="card-flat text-center">
+            <div class="stat-value" id="statEpisodes">0</div>
+            <div class="stat-label">Episodes</div>
+        </div>
+        <div class="card-flat text-center">
+            <div class="stat-value" id="statFrames">0</div>
+            <div class="stat-label">Frames</div>
+        </div>
+        <div class="card-flat text-center">
+            <div class="stat-value" id="statDetections">0</div>
+            <div class="stat-label">Detections</div>
+        </div>
+    </div>
+
+    <div class="grid-3">
+        <a href="/content" class="card clickable" style="text-decoration:none;">
+            <h2 style="color:#30d158;">Content</h2>
+            <p class="text-muted text-sm">Add videos, run detection, process faces. Manage your media pipeline.</p>
+        </a>
+        <a href="/analysis" class="card clickable" style="text-decoration:none;">
+            <h2 style="color:#0a84ff;">Analysis</h2>
+            <p class="text-muted text-sm">Interactive charts, theme analysis, drill down to frames, export data.</p>
+        </a>
+        <a href="/settings" class="card clickable" style="text-decoration:none;">
+            <h2 style="color:#bf5af2;">Settings</h2>
+            <p class="text-muted text-sm">Vocabulary, themes, face clusters, backups, system status.</p>
+        </a>
+    </div>
 </div>
-
-<div class="card" id="quick-stats" style="margin-top:12px;">
-    <h2>Quick Stats</h2>
-    <div id="stats-content" style="color:#666;">Loading...</div>
-</div>
-
+{% endblock %}
+{% block scripts %}
 <script>
 fetch('/api/status').then(r=>r.json()).then(data=>{
-    const el = document.getElementById('stats-content');
-    if(!data.series.length){
-        el.innerHTML = '<p>No videos indexed yet. Start by <a href="/add-videos" style="color:#4a9eff;">adding videos</a>.</p>';
-        return;
-    }
-    let html = '<div class="grid-2">';
-    let totEp=0, totFr=0, totDet=0;
-    data.series.forEach(s=>{totEp+=s.total_episodes; totFr+=s.total_frames; totDet+=s.total_detections;});
-    html += `<div><div class="stat-value">${data.series.length}</div><div class="stat-label">Series</div></div>`;
-    html += `<div><div class="stat-value">${totEp}</div><div class="stat-label">Episodes</div></div>`;
-    html += `<div><div class="stat-value">${totFr.toLocaleString()}</div><div class="stat-label">Frames</div></div>`;
-    html += `<div><div class="stat-value">${totDet.toLocaleString()}</div><div class="stat-label">Detections</div></div>`;
-    html += '</div>';
-    el.innerHTML = html;
+    if(!data.series||!data.series.length) return;
+    let eps=0, frames=0, dets=0;
+    data.series.forEach(s => { eps += s.total_episodes; frames += s.total_frames; dets += s.total_detections; });
+    document.getElementById('statSeries').textContent = data.series.length;
+    document.getElementById('statEpisodes').textContent = eps.toLocaleString();
+    document.getElementById('statFrames').textContent = frames.toLocaleString();
+    document.getElementById('statDetections').textContent = dets.toLocaleString();
+    document.getElementById('stats').style.display = 'grid';
 });
 </script>
 {% endblock %}

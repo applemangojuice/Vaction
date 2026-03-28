@@ -34,6 +34,8 @@ _jobs: dict[str, dict] = {}
 _job_queues: dict[str, queue.Queue] = {}
 _job_logs: dict[str, list] = {}  # Store recent log messages per job
 _config: VactionConfig | None = None
+# GPU lock: serialize GPU-heavy operations (face detection + clustering can OOM if concurrent)
+_gpu_lock = threading.Lock()
 
 
 def _job_update(job_id: str, **kwargs):
@@ -90,59 +92,75 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/content")
+def content_page():
+    return render_template("content.html")
+
+
+@app.route("/analysis")
+def analysis_page():
+    return render_template("analysis.html")
+
+
+@app.route("/settings")
+def settings_page():
+    return render_template("settings.html")
+
+
+# Legacy routes (redirect to new pages)
 @app.route("/add-videos")
 def add_videos_page():
-    return render_template("add_videos.html")
+    return render_template("content.html")
 
 
 @app.route("/detect")
 def detect_page():
-    return render_template("detect.html")
-
-
-@app.route("/search")
-def search_page():
-    return render_template("search.html")
-
-
-@app.route("/status")
-def status_page():
-    return render_template("status.html")
-
-
-@app.route("/vocabulary")
-def vocabulary_page():
-    return render_template("vocabulary.html")
-
-
-@app.route("/themes")
-def themes_page():
-    return render_template("themes.html")
-
-
-@app.route("/charts")
-def charts_page():
-    return render_template("charts.html")
-
-
-@app.route("/insights")
-def insights_page():
-    return render_template("insights.html")
+    return render_template("content.html")
 
 
 @app.route("/processing")
 def processing_page():
-    return render_template("processing.html")
+    return render_template("content.html")
 
 
-@app.route("/faces")
-def faces_page():
-    return render_template("faces.html")
+@app.route("/search")
+def search_page():
+    return render_template("analysis.html")
+
+
+@app.route("/charts")
+def charts_page():
+    return render_template("analysis.html")
+
+
+@app.route("/insights")
+def insights_page():
+    return render_template("analysis.html")
 
 
 @app.route("/explorer")
 def explorer_page():
-    return render_template("explorer.html")
+    return render_template("analysis.html")
+
+
+@app.route("/vocabulary")
+def vocabulary_page():
+    return render_template("settings.html")
+
+
+@app.route("/themes")
+def themes_page():
+    return render_template("settings.html")
+
+
+@app.route("/faces")
+def faces_page():
+    return render_template("settings.html")
+
+
+@app.route("/status")
+def status_page():
+    return render_template("settings.html")
 
 
 # ── API: Status ──────────────────────────────────────────────────────────────
@@ -301,6 +319,10 @@ def api_detect():
                 if not row:
                     _job_put(job_id, "error", f"Series '{series_name}' not found")
                     return
+
+                _job_put(job_id, "status", "Waiting for GPU access...")
+                _gpu_lock.acquire()
+                _job_put(job_id, "status", "GPU acquired. Loading models...")
 
                 from vaction.detectors.registry import DetectorRegistry
                 registry = DetectorRegistry()
@@ -496,9 +518,14 @@ def api_detect():
                 }))
             finally:
                 conn.close()
+                _gpu_lock.release()
         except Exception as e:
             import traceback
             _job_put(job_id, "error", f"{e}\n{traceback.format_exc()}")
+            try:
+                _gpu_lock.release()
+            except RuntimeError:
+                pass
         finally:
             if _jobs[job_id]["status"] == "running":
                 _jobs[job_id]["status"] = "done"
@@ -1177,6 +1204,11 @@ def api_faces_scan():
             from collections import defaultdict
             from concurrent.futures import ThreadPoolExecutor
             config = get_app_config()
+
+            _job_put(job_id, "status", "Waiting for GPU access...")
+            _gpu_lock.acquire()
+            _job_put(job_id, "status", "GPU acquired. Starting face scan...")
+
             conn = init_db(config.db_path)
             try:
                 row = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
@@ -1334,9 +1366,14 @@ def api_faces_scan():
                 _job_put(job_id, "complete", json.dumps({"clusters": len(cluster_map), "faces": len(embeddings)}))
             finally:
                 conn.close()
+                _gpu_lock.release()
         except Exception as e:
             import traceback
             _job_put(job_id, "error", f"{e}\n{traceback.format_exc()}")
+            try:
+                _gpu_lock.release()
+            except RuntimeError:
+                pass
         finally:
             if _jobs[job_id]["status"] == "running":
                 _jobs[job_id]["status"] = "done"
@@ -1768,6 +1805,217 @@ def api_export():
                 mimetype="text/csv",
                 headers={"Content-Disposition": f"attachment; filename={series_name}_detections.csv"},
             )
+    finally:
+        conn.close()
+
+
+# ── API: Theme Analysis (new metrics) ─────────────────────────────────────────
+
+
+@app.route("/api/analysis")
+def api_analysis():
+    """Theme-based analysis with multiple metric types.
+
+    Metrics returned per theme per episode:
+    - frame_pct: % of frames containing ANY label from theme (no double counting)
+    - pixel_area_pct: sum(pixel_area) / (num_frames * width * height) * 100  (episode share)
+    - pixel_minutes: sum(pixel_area * delta_t) / 60
+    - label_breakdown: per-label frame_pct and pixel_area_pct within the theme
+
+    Params: series, themes (comma-sep theme names), metric (frame_pct|pixel_area_pct|pixel_minutes)
+    """
+    series_name = request.args.get("series", "").strip()
+    theme_names = request.args.get("themes", "").strip()
+
+    if not series_name or not theme_names:
+        return jsonify({"error": "series and themes are required"}), 400
+
+    conn = get_db()
+    try:
+        sr = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not sr:
+            return jsonify({"error": f"Series '{series_name}' not found"}), 404
+        series_id = sr["id"]
+
+        # Get episodes
+        episodes = conn.execute("""
+            SELECT e.id, e.number as ep_num, s.number as season_num, e.title,
+                   e.num_frames, e.width, e.height, e.duration_secs
+            FROM episode e JOIN season s ON e.season_id = s.id
+            WHERE s.series_id = ? ORDER BY s.number, e.number
+        """, (series_id,)).fetchall()
+        ep_codes = [f"S{e['season_num']:02d}E{e['ep_num']:02d}" for e in episodes]
+
+        # Get theme labels
+        themes_data = get_all_themes(conn)
+        theme_map = {t["name"].lower(): t for t in themes_data}
+
+        requested = [t.strip() for t in theme_names.split(",") if t.strip()]
+        results = {"episodes": ep_codes, "themes": []}
+
+        for theme_name in requested:
+            t = theme_map.get(theme_name.lower())
+            if not t:
+                continue
+
+            labels = t["labels"]
+            if not labels:
+                continue
+
+            placeholders = ",".join("?" * len(labels))
+            theme_result = {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "labels": labels,
+                "episodes": [],
+            }
+
+            for ep in episodes:
+                total_frames = max(ep["num_frames"], 1)
+                frame_pixels = ep["width"] * ep["height"]
+                total_budget = total_frames * frame_pixels
+
+                # Frame presence: count DISTINCT frames containing ANY of these labels
+                frames_with_theme = conn.execute(f"""
+                    SELECT COUNT(DISTINCT f.id) as c
+                    FROM detection d
+                    JOIN frame f ON d.frame_id = f.id
+                    WHERE f.episode_id = ? AND d.label IN ({placeholders})
+                    AND d.confidence >= 0.25
+                """, (ep["id"], *labels)).fetchone()["c"]
+
+                frame_pct = (frames_with_theme / total_frames * 100) if total_frames > 0 else 0
+
+                # Pixel area: sum all pixel_area for these labels
+                pixel_data = conn.execute(f"""
+                    SELECT COALESCE(SUM(d.pixel_area), 0) as total_area,
+                           COALESCE(SUM(d.pixel_area * f.delta_t), 0) as pixel_time
+                    FROM detection d
+                    JOIN frame f ON d.frame_id = f.id
+                    WHERE f.episode_id = ? AND d.label IN ({placeholders})
+                    AND d.confidence >= 0.25
+                """, (ep["id"], *labels)).fetchone()
+
+                pixel_area_pct = (pixel_data["total_area"] / total_budget * 100) if total_budget > 0 else 0
+                pixel_minutes = pixel_data["pixel_time"] / 60.0
+
+                # Per-label breakdown
+                label_breakdown = []
+                for lbl in labels:
+                    lbl_frames = conn.execute("""
+                        SELECT COUNT(DISTINCT f.id) as c
+                        FROM detection d JOIN frame f ON d.frame_id = f.id
+                        WHERE f.episode_id = ? AND d.label = ? AND d.confidence >= 0.25
+                    """, (ep["id"], lbl)).fetchone()["c"]
+
+                    lbl_area = conn.execute("""
+                        SELECT COALESCE(SUM(d.pixel_area), 0) as a
+                        FROM detection d JOIN frame f ON d.frame_id = f.id
+                        WHERE f.episode_id = ? AND d.label = ? AND d.confidence >= 0.25
+                    """, (ep["id"], lbl)).fetchone()["a"]
+
+                    label_breakdown.append({
+                        "label": lbl,
+                        "frame_pct": round(lbl_frames / total_frames * 100, 4) if total_frames > 0 else 0,
+                        "pixel_area_pct": round(lbl_area / total_budget * 100, 4) if total_budget > 0 else 0,
+                    })
+
+                theme_result["episodes"].append({
+                    "code": f"S{ep['season_num']:02d}E{ep['ep_num']:02d}",
+                    "frame_pct": round(frame_pct, 4),
+                    "pixel_area_pct": round(pixel_area_pct, 4),
+                    "pixel_minutes": round(pixel_minutes, 4),
+                    "label_breakdown": label_breakdown,
+                })
+
+            results["themes"].append(theme_result)
+
+        return jsonify(results)
+    finally:
+        conn.close()
+
+
+@app.route("/api/analysis/drilldown")
+def api_analysis_drilldown():
+    """Get individual detection instances for a theme+episode combination.
+    Returns frame images and detection details for chart drill-down."""
+    series_name = request.args.get("series", "").strip()
+    episode_code = request.args.get("episode", "").strip()
+    label = request.args.get("label", "").strip()
+    theme_name = request.args.get("theme", "").strip()
+    page = max(1, int(request.args.get("page", 1)))
+    per_page = min(100, max(1, int(request.args.get("per_page", 20))))
+
+    if not series_name or not episode_code:
+        return jsonify({"error": "series and episode are required"}), 400
+
+    ep_match = re.match(r"S(\d+)E(\d+)", episode_code, re.IGNORECASE)
+    if not ep_match:
+        return jsonify({"error": "Invalid episode format"}), 400
+
+    conn = get_db()
+    try:
+        sr = conn.execute("SELECT id FROM series WHERE name = ?", (series_name,)).fetchone()
+        if not sr:
+            return jsonify({"error": "Series not found"}), 404
+
+        ep = conn.execute("""
+            SELECT e.id FROM episode e
+            JOIN season sn ON e.season_id = sn.id
+            WHERE sn.series_id = ? AND sn.number = ? AND e.number = ?
+        """, (sr["id"], int(ep_match.group(1)), int(ep_match.group(2)))).fetchone()
+        if not ep:
+            return jsonify({"error": "Episode not found"}), 404
+
+        # Determine labels to query
+        labels = []
+        if label:
+            labels = [label]
+        elif theme_name:
+            themes_data = get_all_themes(conn)
+            for t in themes_data:
+                if t["name"].lower() == theme_name.lower():
+                    labels = t["labels"]
+                    break
+
+        if not labels:
+            return jsonify({"detections": [], "total": 0})
+
+        placeholders = ",".join("?" * len(labels))
+        total = conn.execute(f"""
+            SELECT COUNT(*) as c FROM detection d
+            JOIN frame f ON d.frame_id = f.id
+            WHERE f.episode_id = ? AND d.label IN ({placeholders}) AND d.confidence >= 0.25
+        """, (ep["id"], *labels)).fetchone()["c"]
+
+        offset = (page - 1) * per_page
+        rows = conn.execute(f"""
+            SELECT d.id, d.frame_id, d.label, d.detector, d.confidence,
+                   d.bbox_x, d.bbox_y, d.bbox_w, d.bbox_h, d.pixel_area,
+                   f.timestamp, f.file_path
+            FROM detection d
+            JOIN frame f ON d.frame_id = f.id
+            WHERE f.episode_id = ? AND d.label IN ({placeholders}) AND d.confidence >= 0.25
+            ORDER BY f.timestamp, d.label
+            LIMIT ? OFFSET ?
+        """, (ep["id"], *labels, per_page, offset)).fetchall()
+
+        detections = [{
+            "id": r["id"], "frame_id": r["frame_id"], "label": r["label"],
+            "detector": r["detector"], "confidence": round(r["confidence"], 4),
+            "bbox_x": r["bbox_x"], "bbox_y": r["bbox_y"],
+            "bbox_w": r["bbox_w"], "bbox_h": r["bbox_h"],
+            "pixel_area": r["pixel_area"],
+            "timestamp": round(r["timestamp"], 2),
+            "has_frame": bool(r["file_path"]),
+        } for r in rows]
+
+        return jsonify({
+            "detections": detections,
+            "total": total,
+            "page": page,
+            "pages": max(1, (total + per_page - 1) // per_page),
+        })
     finally:
         conn.close()
 
