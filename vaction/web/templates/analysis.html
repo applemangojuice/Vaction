@@ -4,43 +4,70 @@
 <div class="container-wide">
 {% block content %}
 <h1>Analysis</h1>
-<p class="subtitle">Select themes, view metrics per episode, drill down to frames</p>
+<p class="subtitle">Content fingerprinting — characterise films and episodes by theme composition</p>
 
 <!-- ═══ CONTROLS ═══ -->
 <div class="card">
-    <div class="row gap-16">
-        <div class="form-group">
+    <div class="flex gap-24" style="flex-wrap:wrap;">
+        <div class="form-group" style="min-width:180px;">
             <label>Series</label>
             <select id="seriesSelect" onchange="onSeriesChange()"><option value="">Select...</option></select>
         </div>
-        <div class="form-group">
+        <div class="form-group" style="min-width:180px;">
             <label>Metric</label>
             <div class="segmented" id="metricToggle">
                 <button class="active" onclick="setMetric('frame_pct',this)">Frame %</button>
                 <button onclick="setMetric('pixel_area_pct',this)">Pixel Area %</button>
-                <button onclick="setMetric('pixel_minutes',this)">Pixel Minutes</button>
+                <button onclick="setMetric('pixel_minutes',this)">Pixel Min</button>
+            </div>
+        </div>
+        <div class="form-group" style="min-width:220px;">
+            <label>Confidence Threshold: <span id="confLabel">25%</span></label>
+            <input type="range" id="confSlider" min="10" max="90" value="25" step="5"
+                   style="width:100%;accent-color:#0a84ff;margin-top:4px;"
+                   oninput="document.getElementById('confLabel').textContent=this.value+'%'">
+            <div class="flex justify-between text-xs text-muted" style="margin-top:2px;">
+                <span>10%</span><span>50%</span><span>90%</span>
             </div>
         </div>
     </div>
     <div class="mt-16">
-        <label>Themes</label>
-        <div id="themePills" class="pill-row">
+        <div class="flex items-center justify-between">
+            <label>Themes</label>
+            <div class="flex gap-8">
+                <button class="btn btn-secondary btn-sm" onclick="selectAllThemes()">Select All</button>
+                <button class="btn btn-secondary btn-sm" onclick="clearAllThemes()">Clear</button>
+            </div>
+        </div>
+        <div id="themePills" class="pill-row mt-8">
             <span class="text-muted text-sm">Select a series first</span>
         </div>
     </div>
     <div class="mt-16">
-        <label>Or search individual labels</label>
+        <label>Individual labels</label>
         <div class="row">
-            <div class="form-group">
-                <input type="text" id="labelSearch" placeholder="Type to search labels..." oninput="filterLabels()" />
-            </div>
+            <div class="form-group"><input type="text" id="labelSearch" placeholder="Type to search labels..." oninput="filterLabels()" /></div>
         </div>
-        <div id="labelPills" class="pill-row mt-8" style="max-height:120px;overflow-y:auto;"></div>
+        <div id="labelPills" class="pill-row mt-8" style="max-height:100px;overflow-y:auto;"></div>
     </div>
     <div class="flex items-center gap-8 mt-16">
         <button class="btn" onclick="runAnalysis()">Analyze</button>
         <button class="btn btn-secondary" onclick="exportData('csv')">Export CSV</button>
         <button class="btn btn-secondary" onclick="exportData('json')">Export JSON</button>
+    </div>
+</div>
+
+<!-- ═══ HEATMAP TABLE: Content Fingerprint ═══ -->
+<div id="heatmapSection" class="hidden">
+    <div class="card">
+        <div class="flex items-center justify-between mb-8">
+            <h2>Content Fingerprint</h2>
+            <p class="text-xs text-muted">Click any cell to drill down into frame-level evidence</p>
+        </div>
+        <p class="text-xs text-muted mb-16" id="metricDescription">% of frames containing at least one detection from this theme (no double counting)</p>
+        <div style="overflow-x:auto;">
+            <table id="heatmapTable"></table>
+        </div>
     </div>
 </div>
 
@@ -55,7 +82,6 @@
                 <button onclick="setChartType('stacked100',this)">100%</button>
             </div>
         </div>
-        <p class="text-xs text-muted mb-8" id="metricDescription">% of frames in each episode containing at least one detection from this theme (no double counting)</p>
         <div id="overviewChart" class="chart-container"></div>
     </div>
 </div>
@@ -76,22 +102,20 @@
     </div>
 </div>
 
-<!-- ═══ DATA TABLE ═══ -->
-<div id="tableSection" class="hidden">
-    <div class="card">
-        <h2>Data Table</h2>
-        <div style="overflow-x:auto;">
-            <table id="dataTable"></table>
-        </div>
-    </div>
-</div>
-
 <!-- ═══ DRILLDOWN PANEL (slides in from right) ═══ -->
 <div class="drilldown-panel" id="drilldownPanel">
     <button class="close-btn" onclick="closeDrilldown()">&times;</button>
     <h2 id="drilldownTitle" style="margin-bottom:4px;">Drill Down</h2>
-    <p class="text-muted text-sm mb-16" id="drilldownSubtitle"></p>
+    <p class="text-muted text-sm mb-8" id="drilldownSubtitle"></p>
+    <div class="flex items-center gap-8 mb-16">
+        <span class="text-xs text-muted" id="drilldownConfNote"></span>
+    </div>
     <div id="drilldownContent"></div>
+    <div id="drilldownPagination" class="flex items-center justify-between mt-16 hidden">
+        <button class="btn btn-secondary btn-sm" id="drillPrev" onclick="drilldownPage(-1)">Previous</button>
+        <span class="text-xs text-muted" id="drillPageInfo"></span>
+        <button class="btn btn-secondary btn-sm" id="drillNext" onclick="drilldownPage(1)">Next</button>
+    </div>
 </div>
 
 {% endblock %}
@@ -104,6 +128,7 @@
 const STATE = {
     series: '',
     metric: 'frame_pct',
+    confidence: 0.25,
     chartType: 'grouped',
     breakdownType: 'stacked',
     selectedThemes: new Set(),
@@ -111,6 +136,7 @@ const STATE = {
     allThemes: [],
     allLabels: [],
     analysisData: null,
+    drilldown: { theme: null, episode: null, label: null, page: 1, pages: 1 },
 };
 
 const PLOTLY_LAYOUT = {
@@ -122,7 +148,7 @@ const PLOTLY_LAYOUT = {
     yaxis: { gridcolor: 'rgba(255,255,255,0.04)', tickfont: { size: 11 } },
     legend: { orientation: 'h', y: -0.15, font: { size: 11 } },
     hoverlabel: { bgcolor: '#1c1c1e', bordercolor: 'rgba(255,255,255,0.1)', font: { color: '#f5f5f7', size: 12 } },
-    hovermode: 'x unified',
+    hovermode: 'closest',
 };
 const COLORS = ['#0a84ff','#30d158','#ff9f0a','#ff453a','#bf5af2','#64d2ff','#ffd60a','#ff375f','#ac8e68','#5e5ce6',
                 '#30b0c7','#ff6482','#66d4cf','#8e8e93','#34c759','#5856d6','#ff2d55','#007aff','#ffcc00','#ff6b22'];
@@ -132,10 +158,24 @@ const METRIC_LABELS = {
     pixel_minutes: 'Pixel Minutes',
 };
 const METRIC_DESC = {
-    frame_pct: '% of frames in each episode containing at least one detection from this theme (no double counting)',
-    pixel_area_pct: 'Sum of detected pixel area ÷ total pixel budget (frames × resolution). Can exceed 100% if objects overlap.',
-    pixel_minutes: 'Sum of (pixel area × frame duration) ÷ 60. Represents total screen-time weighted by object size.',
+    frame_pct: '% of frames containing at least one detection from this theme (no double counting overlapping objects)',
+    pixel_area_pct: 'Sum of detected pixel area ÷ total pixel budget. Can exceed 100% if multiple objects overlap.',
+    pixel_minutes: 'Sum of (pixel area × frame duration) ÷ 60. Screen-time weighted by object size.',
 };
+
+// ── Heatmap color scale ──
+function heatColor(val, metric) {
+    // Returns a CSS background for a heatmap cell
+    const maxVal = metric === 'pixel_minutes' ? 20 : 50;
+    const intensity = Math.min(val / maxVal, 1);
+    if (intensity < 0.01) return 'transparent';
+    // Blue gradient
+    const r = Math.round(10 + intensity * 0);
+    const g = Math.round(20 + intensity * 80);
+    const b = Math.round(40 + intensity * 215);
+    const a = 0.15 + intensity * 0.5;
+    return `rgba(${r},${g},${b},${a})`;
+}
 
 // ── Init ──
 fetch('/api/series').then(r=>r.json()).then(data => {
@@ -148,12 +188,10 @@ function onSeriesChange() {
     STATE.selectedThemes.clear();
     STATE.selectedLabels.clear();
     if (!STATE.series) return;
-    // Load themes
     fetch('/api/themes').then(r=>r.json()).then(data => {
         STATE.allThemes = data.themes || [];
         renderThemePills();
     });
-    // Load labels
     fetch('/api/labels?series=' + encodeURIComponent(STATE.series)).then(r=>r.json()).then(data => {
         STATE.allLabels = (data.labels || []).map(l => l.label);
         renderLabelPills();
@@ -162,10 +200,10 @@ function onSeriesChange() {
 
 function renderThemePills() {
     const el = document.getElementById('themePills');
-    if (!STATE.allThemes.length) { el.innerHTML = '<span class="text-muted text-sm">No themes configured. Go to Settings to create themes.</span>'; return; }
+    if (!STATE.allThemes.length) { el.innerHTML = '<span class="text-muted text-sm">No themes. Go to Settings to create them.</span>'; return; }
     el.innerHTML = STATE.allThemes.map(t => {
         const active = STATE.selectedThemes.has(t.name) ? ' active' : '';
-        return `<span class="pill${active}" onclick="toggleTheme('${t.name}')">${t.name} <span class="text-xs text-muted">(${t.labels.length})</span></span>`;
+        return `<span class="pill${active}" onclick="toggleTheme('${t.name.replace(/'/g,"\\'")}')">${t.name} <span class="text-xs text-muted">(${t.labels.length})</span></span>`;
     }).join('');
 }
 
@@ -181,14 +219,20 @@ function renderLabelPills() {
 function filterLabels() { renderLabelPills(); }
 
 function toggleTheme(name) {
-    if (STATE.selectedThemes.has(name)) STATE.selectedThemes.delete(name);
-    else STATE.selectedThemes.add(name);
+    if (STATE.selectedThemes.has(name)) STATE.selectedThemes.delete(name); else STATE.selectedThemes.add(name);
     renderThemePills();
 }
 function toggleLabel(name) {
-    if (STATE.selectedLabels.has(name)) STATE.selectedLabels.delete(name);
-    else STATE.selectedLabels.add(name);
+    if (STATE.selectedLabels.has(name)) STATE.selectedLabels.delete(name); else STATE.selectedLabels.add(name);
     renderLabelPills();
+}
+function selectAllThemes() {
+    STATE.allThemes.forEach(t => STATE.selectedThemes.add(t.name));
+    renderThemePills();
+}
+function clearAllThemes() {
+    STATE.selectedThemes.clear();
+    renderThemePills();
 }
 
 function setMetric(m, btn) {
@@ -196,7 +240,7 @@ function setMetric(m, btn) {
     document.querySelectorAll('#metricToggle button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('metricDescription').textContent = METRIC_DESC[m];
-    if (STATE.analysisData) renderCharts();
+    if (STATE.analysisData) renderAll();
 }
 function setChartType(t, btn) {
     STATE.chartType = t;
@@ -218,51 +262,92 @@ function runAnalysis() {
     const labels = [...STATE.selectedLabels];
     if (!themes.length && !labels.length) { alert('Select at least one theme or label.'); return; }
 
-    // Build theme param (for labels, create pseudo-themes)
-    let themeParam = themes.join(',');
-    // For individual labels, we use the chart/breakdown endpoint
+    STATE.confidence = parseInt(document.getElementById('confSlider').value) / 100;
+
     if (labels.length && !themes.length) {
-        // Use chart endpoint for individual labels
-        fetch(`/api/chart?series=${encodeURIComponent(STATE.series)}&terms=${encodeURIComponent(labels.join(','))}`)
+        fetch(`/api/chart?series=${encodeURIComponent(STATE.series)}&terms=${encodeURIComponent(labels.join(','))}&confidence=${STATE.confidence}`)
         .then(r=>r.json()).then(data => {
             STATE.analysisData = { type: 'labels', data };
-            renderCharts();
+            renderAll();
         });
         return;
     }
 
-    fetch(`/api/analysis?series=${encodeURIComponent(STATE.series)}&themes=${encodeURIComponent(themeParam)}`)
+    fetch(`/api/analysis?series=${encodeURIComponent(STATE.series)}&themes=${encodeURIComponent(themes.join(','))}&confidence=${STATE.confidence}`)
     .then(r=>r.json()).then(data => {
         STATE.analysisData = { type: 'themes', data };
-        renderCharts();
+        renderAll();
     });
 }
 
-function renderCharts() {
+function renderAll() {
     if (!STATE.analysisData) return;
     if (STATE.analysisData.type === 'themes') {
+        renderHeatmap();
         renderOverviewChart();
         renderBreakdownCharts();
-        renderDataTable();
     } else {
+        document.getElementById('heatmapSection').classList.add('hidden');
+        document.getElementById('breakdownSection').classList.add('hidden');
         renderLabelsChart();
     }
 }
 
+// ── Heatmap Table (primary view) ──
+function renderHeatmap() {
+    const data = STATE.analysisData.data;
+    const m = STATE.metric;
+    const eps = data.episodes;
+    const themes = data.themes;
+    document.getElementById('heatmapSection').classList.remove('hidden');
+
+    const table = document.getElementById('heatmapTable');
+    let html = '<thead><tr><th style="position:sticky;left:0;background:#1c1c1e;z-index:2;">Episode</th>';
+    themes.forEach(t => html += `<th style="white-space:nowrap;font-size:11px;">${t.name.replace(/_/g, ' ')}</th>`);
+    html += '</tr></thead><tbody>';
+
+    eps.forEach((ep, i) => {
+        html += `<tr><td style="position:sticky;left:0;background:rgba(28,28,30,0.95);z-index:1;font-weight:500;font-size:13px;">${ep}</td>`;
+        themes.forEach((t, ti) => {
+            const epData = t.episodes[i];
+            if (!epData) { html += '<td>-</td>'; return; }
+            const val = epData[m];
+            const fmt = m === 'pixel_minutes' ? val.toFixed(1) : val.toFixed(1) + '%';
+            const bg = heatColor(val, m);
+            const themeName = t.name.replace(/'/g, "\\'");
+            html += `<td style="background:${bg};cursor:pointer;text-align:center;font-size:12px;font-weight:500;min-width:80px;transition:opacity 0.15s;"
+                         onclick="openDrilldown('${themeName}','${ep}',null)"
+                         onmouseover="this.style.opacity='0.7'" onmouseout="this.style.opacity='1'">${fmt}</td>`;
+        });
+        html += '</tr>';
+    });
+
+    // Summary row
+    html += '<tr style="border-top:2px solid rgba(255,255,255,0.1);"><td style="position:sticky;left:0;background:rgba(28,28,30,0.95);z-index:1;font-weight:600;font-size:12px;color:rgba(255,255,255,0.5);">AVERAGE</td>';
+    themes.forEach(t => {
+        const vals = t.episodes.map(e => e[m]);
+        const avg = vals.length ? vals.reduce((a,b) => a + b, 0) / vals.length : 0;
+        const fmt = m === 'pixel_minutes' ? avg.toFixed(1) : avg.toFixed(1) + '%';
+        const bg = heatColor(avg, m);
+        html += `<td style="background:${bg};text-align:center;font-size:12px;font-weight:600;">${fmt}</td>`;
+    });
+    html += '</tr></tbody>';
+    table.innerHTML = html;
+}
+
+// ── Overview Chart ──
 function renderOverviewChart() {
     const data = STATE.analysisData.data;
     const eps = data.episodes;
     const m = STATE.metric;
     document.getElementById('overviewSection').classList.remove('hidden');
 
-    const traces = data.themes.map((t, i) => {
-        const values = t.episodes.map(e => e[m]);
-        return {
-            x: eps, y: values, name: t.name, type: 'bar',
-            marker: { color: COLORS[i % COLORS.length], opacity: 0.9 },
-            hovertemplate: `<b>${t.name}</b><br>%{x}: %{y:.2f}${m.includes('pct') ? '%' : ''}<extra></extra>`,
-        };
-    });
+    const traces = data.themes.map((t, i) => ({
+        x: eps, y: t.episodes.map(e => e[m]), name: t.name.replace(/_/g, ' '), type: 'bar',
+        marker: { color: COLORS[i % COLORS.length], opacity: 0.9 },
+        hovertemplate: `<b>${t.name.replace(/_/g,' ')}</b><br>%{x}: %{y:.2f}${m.includes('pct') ? '%' : ''}<extra></extra>`,
+        customdata: t.episodes.map((e, j) => ({ theme: t.name, episode: eps[j] })),
+    }));
 
     const layout = {
         ...PLOTLY_LAYOUT,
@@ -271,39 +356,44 @@ function renderOverviewChart() {
         yaxis: { ...PLOTLY_LAYOUT.yaxis, title: METRIC_LABELS[m] },
     };
     Plotly.newPlot('overviewChart', traces, layout, { responsive: true, displaylogo: false });
-    // Click handler for drill-down
     document.getElementById('overviewChart').on('plotly_click', function(d) {
         if (d.points && d.points.length) {
             const pt = d.points[0];
-            openDrilldown(pt.data.name, pt.x, null);
+            const cd = pt.customdata;
+            openDrilldown(cd.theme, cd.episode, null);
         }
     });
 }
 
+// ── Breakdown Charts ──
 function renderBreakdownCharts() {
     const data = STATE.analysisData.data;
     const eps = data.episodes;
     const m = STATE.metric === 'frame_pct' ? 'frame_pct' : 'pixel_area_pct';
     document.getElementById('breakdownSection').classList.remove('hidden');
 
-    // Show breakdown for each selected theme
     const allTraces = [];
     let colorIdx = 0;
 
     data.themes.forEach(theme => {
         document.getElementById('breakdownTitle').textContent = data.themes.length === 1
-            ? `${theme.name} — Label Breakdown` : 'Label Breakdown';
+            ? `${theme.name.replace(/_/g,' ')} — Label Breakdown` : 'Label Breakdown';
 
-        theme.episodes[0]?.label_breakdown.forEach((lb, j) => {
+        const labelNames = theme.episodes[0]?.label_breakdown?.map(lb => lb.label) || [];
+        labelNames.forEach(lbl => {
             const values = theme.episodes.map(ep => {
-                const found = ep.label_breakdown.find(x => x.label === lb.label);
+                const found = ep.label_breakdown.find(x => x.label === lbl);
                 return found ? found[m] : 0;
             });
-            allTraces.push({
-                x: eps, y: values, name: lb.label, type: 'bar',
-                marker: { color: COLORS[colorIdx % COLORS.length], opacity: 0.85 },
-                hovertemplate: `<b>${lb.label}</b><br>%{x}: %{y:.3f}%<extra></extra>`,
-            });
+            // Only include labels that have some data
+            if (values.some(v => v > 0)) {
+                allTraces.push({
+                    x: eps, y: values, name: lbl, type: 'bar',
+                    marker: { color: COLORS[colorIdx % COLORS.length], opacity: 0.85 },
+                    hovertemplate: `<b>${lbl}</b><br>%{x}: %{y:.3f}%<extra></extra>`,
+                    customdata: eps.map(ep => ({ label: lbl, episode: ep })),
+                });
+            }
             colorIdx++;
         });
     });
@@ -318,20 +408,22 @@ function renderBreakdownCharts() {
     document.getElementById('breakdownChart').on('plotly_click', function(d) {
         if (d.points && d.points.length) {
             const pt = d.points[0];
-            openDrilldown(null, pt.x, pt.data.name);
+            const cd = pt.customdata;
+            openDrilldown(null, cd.episode, cd.label);
         }
     });
 }
 
+// ── Labels chart (non-theme mode) ──
 function renderLabelsChart() {
     const data = STATE.analysisData.data;
     document.getElementById('overviewSection').classList.remove('hidden');
-    document.getElementById('breakdownSection').classList.add('hidden');
 
     const traces = data.datasets.map((ds, i) => ({
         x: data.labels, y: ds.data, name: ds.term, type: 'bar',
         marker: { color: COLORS[i % COLORS.length], opacity: 0.9 },
         hovertemplate: `<b>${ds.term}</b><br>%{x}: %{y:.4f}%<extra></extra>`,
+        customdata: data.labels.map(ep => ({ label: ds.term, episode: ep })),
     }));
 
     const layout = {
@@ -344,98 +436,83 @@ function renderLabelsChart() {
     document.getElementById('overviewChart').on('plotly_click', function(d) {
         if (d.points && d.points.length) {
             const pt = d.points[0];
-            openDrilldown(null, pt.x, pt.data.name);
+            const cd = pt.customdata;
+            openDrilldown(null, cd.episode, cd.label);
         }
     });
-    renderLabelDataTable(data);
-}
-
-function renderDataTable() {
-    const data = STATE.analysisData.data;
-    const m = STATE.metric;
-    document.getElementById('tableSection').classList.remove('hidden');
-    const table = document.getElementById('dataTable');
-    const themes = data.themes;
-
-    let html = '<thead><tr><th>Episode</th>';
-    themes.forEach(t => html += `<th>${t.name}</th>`);
-    html += '</tr></thead><tbody>';
-
-    data.episodes.forEach((ep, i) => {
-        html += `<tr><td>${ep}</td>`;
-        themes.forEach(t => {
-            const val = t.episodes[i] ? t.episodes[i][m] : 0;
-            const fmt = m === 'pixel_minutes' ? val.toFixed(2) : val.toFixed(2) + '%';
-            const opacity = Math.min(val / (m === 'pixel_minutes' ? 10 : 30), 1);
-            html += `<td style="background:rgba(10,132,255,${opacity * 0.15});cursor:pointer;" onclick="openDrilldown('${t.name}','${ep}',null)">${fmt}</td>`;
-        });
-        html += '</tr>';
-    });
-    html += '</tbody>';
-    table.innerHTML = html;
-}
-
-function renderLabelDataTable(data) {
-    document.getElementById('tableSection').classList.remove('hidden');
-    const table = document.getElementById('dataTable');
-    let html = '<thead><tr><th>Episode</th>';
-    data.datasets.forEach(ds => html += `<th>${ds.term}</th>`);
-    html += '</tr></thead><tbody>';
-    data.labels.forEach((ep, i) => {
-        html += `<tr><td>${ep}</td>`;
-        data.datasets.forEach(ds => {
-            const val = ds.data[i] || 0;
-            const opacity = Math.min(val / 10, 1);
-            html += `<td style="background:rgba(10,132,255,${opacity * 0.15});">${val.toFixed(4)}%</td>`;
-        });
-        html += '</tr>';
-    });
-    html += '</tbody>';
-    table.innerHTML = html;
 }
 
 // ── Drilldown ──
 function openDrilldown(themeName, episodeCode, labelName) {
+    STATE.drilldown = { theme: themeName, episode: episodeCode, label: labelName, page: 1, pages: 1 };
     const panel = document.getElementById('drilldownPanel');
     panel.classList.add('open');
-    document.getElementById('drilldownTitle').textContent = labelName || themeName || 'Details';
-    document.getElementById('drilldownSubtitle').textContent = episodeCode + (themeName && labelName ? ` — ${themeName}` : '');
+    document.getElementById('drilldownTitle').textContent = labelName || (themeName ? themeName.replace(/_/g, ' ') : 'Details');
+    document.getElementById('drilldownSubtitle').textContent = episodeCode + (themeName && labelName ? ` — ${themeName.replace(/_/g,' ')}` : '');
+    document.getElementById('drilldownConfNote').textContent = `Confidence ≥ ${Math.round(STATE.confidence * 100)}%`;
+    loadDrilldownPage(1);
+}
 
+function loadDrilldownPage(page) {
+    STATE.drilldown.page = page;
+    const { theme, episode, label } = STATE.drilldown;
     const params = new URLSearchParams({
         series: STATE.series,
-        episode: episodeCode,
+        episode: episode,
         per_page: '20',
+        page: String(page),
+        confidence: String(STATE.confidence),
     });
-    if (labelName) params.set('label', labelName);
-    else if (themeName) params.set('theme', themeName);
+    if (label) params.set('label', label);
+    else if (theme) params.set('theme', theme);
 
     document.getElementById('drilldownContent').innerHTML = '<p class="text-muted text-sm">Loading...</p>';
     fetch('/api/analysis/drilldown?' + params).then(r=>r.json()).then(data => {
+        STATE.drilldown.pages = data.pages || 1;
         if (!data.detections || !data.detections.length) {
-            document.getElementById('drilldownContent').innerHTML = '<p class="text-muted text-sm">No detections found.</p>';
+            document.getElementById('drilldownContent').innerHTML = '<p class="text-muted text-sm">No detections found at this confidence level.</p>';
+            document.getElementById('drilldownPagination').classList.add('hidden');
             return;
         }
-        let html = `<p class="text-xs text-muted mb-16">${data.total} detections total (showing ${data.detections.length})</p>`;
-        html += '<div style="display:flex;flex-direction:column;gap:12px;">';
+        let html = `<p class="text-xs text-muted mb-16">${data.total} detections total</p>`;
+        html += '<div style="display:flex;flex-direction:column;gap:10px;">';
         data.detections.forEach(d => {
             const ts = formatTime(d.timestamp);
-            html += `<div class="card-flat" style="padding:12px;">
-                <div class="flex gap-16 items-center">
-                    ${d.has_frame ? `<img src="/api/explorer/frame/${d.frame_id}" style="width:120px;height:80px;object-fit:cover;border-radius:8px;background:rgba(255,255,255,0.04);" loading="lazy">` : '<div style="width:120px;height:80px;background:rgba(255,255,255,0.04);border-radius:8px;"></div>'}
+            const confColor = d.confidence >= 0.5 ? '#30d158' : d.confidence >= 0.3 ? '#ff9f0a' : '#ff453a';
+            html += `<div class="card-flat" style="padding:10px;">
+                <div class="flex gap-12 items-center">
+                    ${d.has_frame ? `<img src="/api/explorer/frame/${d.frame_id}" style="width:100px;height:66px;object-fit:cover;border-radius:6px;background:rgba(255,255,255,0.04);flex-shrink:0;" loading="lazy">` : '<div style="width:100px;height:66px;background:rgba(255,255,255,0.04);border-radius:6px;flex-shrink:0;"></div>'}
                     <div style="flex:1;min-width:0;">
-                        <div class="text-sm" style="color:#f5f5f7;font-weight:500;">${d.label}</div>
-                        <div class="text-xs text-muted">${ts} · ${d.detector} · conf ${(d.confidence*100).toFixed(0)}%</div>
-                        ${d.bbox_w ? `<div class="text-xs text-muted">${d.bbox_w}×${d.bbox_h}px (${d.pixel_area?.toLocaleString() || '?'} px²)</div>` : ''}
+                        <div style="font-size:13px;color:#f5f5f7;font-weight:500;">${d.label}</div>
+                        <div class="text-xs text-muted">${ts} · ${d.detector}</div>
+                        <div class="text-xs" style="margin-top:2px;">
+                            <span style="color:${confColor};font-weight:600;">${(d.confidence*100).toFixed(0)}%</span>
+                            ${d.bbox_w ? ` · ${d.bbox_w}×${d.bbox_h}px` : ''}
+                            ${d.pixel_area ? ` · ${d.pixel_area.toLocaleString()} px²` : ''}
+                        </div>
                     </div>
                 </div>
             </div>`;
         });
         html += '</div>';
-        if (data.pages > 1) {
-            html += `<p class="text-xs text-muted mt-16 text-center">Page 1 of ${data.pages}</p>`;
-        }
         document.getElementById('drilldownContent').innerHTML = html;
+
+        // Pagination
+        const pg = document.getElementById('drilldownPagination');
+        if (data.pages > 1) {
+            pg.classList.remove('hidden');
+            document.getElementById('drillPageInfo').textContent = `Page ${page} of ${data.pages}`;
+            document.getElementById('drillPrev').disabled = page <= 1;
+            document.getElementById('drillNext').disabled = page >= data.pages;
+        } else {
+            pg.classList.add('hidden');
+        }
     });
+}
+
+function drilldownPage(delta) {
+    const newPage = STATE.drilldown.page + delta;
+    if (newPage >= 1 && newPage <= STATE.drilldown.pages) loadDrilldownPage(newPage);
 }
 
 function closeDrilldown() {

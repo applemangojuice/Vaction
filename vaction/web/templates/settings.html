@@ -64,7 +64,10 @@
     </div>
 
     <div class="card">
-        <h2>Existing Themes</h2>
+        <div class="flex items-center justify-between mb-16">
+            <h2 style="margin:0;">Existing Themes</h2>
+            <button class="btn btn-secondary btn-sm" onclick="resetThemes()">Reset to 10 Default Themes</button>
+        </div>
         <div id="themeList">Loading...</div>
     </div>
 </div>
@@ -193,6 +196,13 @@ function createTheme() {
 function deleteTheme(id) {
     if (!confirm('Delete this theme?')) return;
     fetch(`/api/themes/${id}`, {method:'DELETE'}).then(() => loadThemes());
+}
+function resetThemes() {
+    if (!confirm('Delete all existing themes and load the 10 default themes?')) return;
+    fetch('/api/themes/reset', {method:'POST'}).then(r=>r.json()).then(d => {
+        loadThemes();
+        alert(`Loaded ${d.created} default themes.`);
+    });
 }
 
 // ── Status ──

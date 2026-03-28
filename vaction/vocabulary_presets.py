@@ -189,44 +189,54 @@ VOCABULARY = [
 # Default themes
 DEFAULT_THEMES = [
     {
-        "name": "vehicles",
-        "description": "All vehicle-related detections",
-        "labels": ["car", "truck", "bus", "van", "motorcycle", "bicycle", "taxi", "police_car", "ambulance", "boat", "helicopter", "airplane", "train", "suv", "emergency_vehicle"],
+        "name": "vehicular_action",
+        "description": "Vehicle-related action and transportation",
+        "labels": ["car", "motorcycle", "truck", "bus", "van", "taxi", "police_car", "bicycle", "boat", "helicopter", "airplane", "train", "suv", "emergency_vehicle", "driving"],
     },
     {
-        "name": "people_action",
-        "description": "All human actions and body language",
-        "labels": ["walking", "running", "sitting", "talking", "crying", "laughing", "fighting", "hugging", "eating", "typing", "reading", "dancing", "driving", "on_phone"],
+        "name": "combat",
+        "description": "Fighting, weapons, and violent action",
+        "labels": ["fighting", "weapon", "knife", "explosion", "fire", "running", "blood"],
     },
     {
-        "name": "indoor_spaces",
-        "description": "All indoor scene types",
-        "labels": ["office", "hallway", "stairwell", "elevator", "conference_room", "cubicle", "kitchen", "lobby", "bathroom", "bedroom", "living_room", "dining_room", "hospital", "restaurant"],
+        "name": "human_presence",
+        "description": "People and their visual framing",
+        "labels": ["person", "face_closeup", "close_up", "group_of_people", "crowd", "two_shot", "group_shot"],
     },
     {
-        "name": "outdoor_spaces",
-        "description": "All outdoor scene types",
-        "labels": ["exterior_road", "parking_lot", "garden", "forest", "beach", "city_street", "suburban", "rural", "rooftop", "park"],
+        "name": "social_interaction",
+        "description": "Interpersonal and social activities",
+        "labels": ["talking", "sitting", "hugging", "laughing", "on_phone", "reading", "eating", "group_of_people", "two_shot"],
     },
     {
         "name": "technology",
         "description": "Screens, devices, and tech objects",
-        "labels": ["screen", "laptop", "phone", "television", "camera", "printer"],
+        "labels": ["laptop", "phone", "printer", "screen", "television", "camera", "typing"],
     },
     {
-        "name": "danger",
-        "description": "Weapons, violence, and danger indicators",
-        "labels": ["weapon", "knife", "blood", "fire", "explosion", "fighting"],
+        "name": "outdoor_environment",
+        "description": "Outdoor locations and wide environments",
+        "labels": ["beach", "forest", "exterior_road", "city_street", "rooftop", "garden", "park", "rural", "suburban", "parking_lot", "wide_shot"],
     },
     {
-        "name": "mood_dark",
-        "description": "Dark, tense, or ominous visual indicators",
-        "labels": ["dark", "nighttime", "dramatic_shadows", "tense", "dark_aesthetic"],
+        "name": "interior_domestic",
+        "description": "Indoor rooms and built spaces",
+        "labels": ["office", "hallway", "kitchen", "bedroom", "living_room", "dining_room", "lobby", "bathroom", "conference_room", "cubicle", "warehouse", "basement"],
     },
     {
-        "name": "mood_bright",
-        "description": "Bright, calm, or positive visual indicators",
-        "labels": ["bright", "daytime", "natural_light", "calm", "warm_tones"],
+        "name": "emotion",
+        "description": "Emotional expression and mood",
+        "labels": ["crying", "hugging", "laughing", "tense", "calm"],
+    },
+    {
+        "name": "pursuit_motion",
+        "description": "Chase sequences and movement",
+        "labels": ["running", "driving", "walking", "car", "motorcycle", "helicopter", "airplane", "chaotic"],
+    },
+    {
+        "name": "spectacle_scale",
+        "description": "Large-scale dramatic visuals",
+        "labels": ["explosion", "crowd", "airplane", "helicopter", "wide_shot", "fire", "chaotic"],
     },
 ]
 

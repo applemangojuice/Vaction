@@ -1140,6 +1140,26 @@ def api_themes_delete(theme_id):
         conn.close()
 
 
+@app.route("/api/themes/reset", methods=["POST"])
+def api_themes_reset():
+    """Delete all themes and re-seed from defaults."""
+    conn = get_db()
+    try:
+        # Delete all existing themes
+        themes = get_all_themes(conn)
+        for t in themes:
+            delete_theme(conn, t["id"])
+        # Force re-seed
+        from vaction.vocabulary_presets import DEFAULT_THEMES
+        created = 0
+        for t in DEFAULT_THEMES:
+            create_theme(conn, t["name"], t["description"], t["labels"])
+            created += 1
+        return jsonify({"ok": True, "created": created})
+    finally:
+        conn.close()
+
+
 # ── API: Faces ──────────────────────────────────────────────────────────────
 
 
@@ -1826,6 +1846,7 @@ def api_analysis():
     """
     series_name = request.args.get("series", "").strip()
     theme_names = request.args.get("themes", "").strip()
+    confidence = float(request.args.get("confidence", 0.25))
 
     if not series_name or not theme_names:
         return jsonify({"error": "series and themes are required"}), 400
@@ -1851,7 +1872,7 @@ def api_analysis():
         theme_map = {t["name"].lower(): t for t in themes_data}
 
         requested = [t.strip() for t in theme_names.split(",") if t.strip()]
-        results = {"episodes": ep_codes, "themes": []}
+        results = {"episodes": ep_codes, "themes": [], "confidence": confidence}
 
         for theme_name in requested:
             t = theme_map.get(theme_name.lower())
@@ -1881,8 +1902,8 @@ def api_analysis():
                     FROM detection d
                     JOIN frame f ON d.frame_id = f.id
                     WHERE f.episode_id = ? AND d.label IN ({placeholders})
-                    AND d.confidence >= 0.25
-                """, (ep["id"], *labels)).fetchone()["c"]
+                    AND d.confidence >= ?
+                """, (ep["id"], *labels, confidence)).fetchone()["c"]
 
                 frame_pct = (frames_with_theme / total_frames * 100) if total_frames > 0 else 0
 
@@ -1893,8 +1914,8 @@ def api_analysis():
                     FROM detection d
                     JOIN frame f ON d.frame_id = f.id
                     WHERE f.episode_id = ? AND d.label IN ({placeholders})
-                    AND d.confidence >= 0.25
-                """, (ep["id"], *labels)).fetchone()
+                    AND d.confidence >= ?
+                """, (ep["id"], *labels, confidence)).fetchone()
 
                 pixel_area_pct = (pixel_data["total_area"] / total_budget * 100) if total_budget > 0 else 0
                 pixel_minutes = pixel_data["pixel_time"] / 60.0
@@ -1905,14 +1926,14 @@ def api_analysis():
                     lbl_frames = conn.execute("""
                         SELECT COUNT(DISTINCT f.id) as c
                         FROM detection d JOIN frame f ON d.frame_id = f.id
-                        WHERE f.episode_id = ? AND d.label = ? AND d.confidence >= 0.25
-                    """, (ep["id"], lbl)).fetchone()["c"]
+                        WHERE f.episode_id = ? AND d.label = ? AND d.confidence >= ?
+                    """, (ep["id"], lbl, confidence)).fetchone()["c"]
 
                     lbl_area = conn.execute("""
                         SELECT COALESCE(SUM(d.pixel_area), 0) as a
                         FROM detection d JOIN frame f ON d.frame_id = f.id
-                        WHERE f.episode_id = ? AND d.label = ? AND d.confidence >= 0.25
-                    """, (ep["id"], lbl)).fetchone()["a"]
+                        WHERE f.episode_id = ? AND d.label = ? AND d.confidence >= ?
+                    """, (ep["id"], lbl, confidence)).fetchone()["a"]
 
                     label_breakdown.append({
                         "label": lbl,
@@ -1943,6 +1964,7 @@ def api_analysis_drilldown():
     episode_code = request.args.get("episode", "").strip()
     label = request.args.get("label", "").strip()
     theme_name = request.args.get("theme", "").strip()
+    confidence = float(request.args.get("confidence", 0.25))
     page = max(1, int(request.args.get("page", 1)))
     per_page = min(100, max(1, int(request.args.get("per_page", 20))))
 
@@ -1985,8 +2007,8 @@ def api_analysis_drilldown():
         total = conn.execute(f"""
             SELECT COUNT(*) as c FROM detection d
             JOIN frame f ON d.frame_id = f.id
-            WHERE f.episode_id = ? AND d.label IN ({placeholders}) AND d.confidence >= 0.25
-        """, (ep["id"], *labels)).fetchone()["c"]
+            WHERE f.episode_id = ? AND d.label IN ({placeholders}) AND d.confidence >= ?
+        """, (ep["id"], *labels, confidence)).fetchone()["c"]
 
         offset = (page - 1) * per_page
         rows = conn.execute(f"""
@@ -1995,10 +2017,10 @@ def api_analysis_drilldown():
                    f.timestamp, f.file_path
             FROM detection d
             JOIN frame f ON d.frame_id = f.id
-            WHERE f.episode_id = ? AND d.label IN ({placeholders}) AND d.confidence >= 0.25
+            WHERE f.episode_id = ? AND d.label IN ({placeholders}) AND d.confidence >= ?
             ORDER BY f.timestamp, d.label
             LIMIT ? OFFSET ?
-        """, (ep["id"], *labels, per_page, offset)).fetchall()
+        """, (ep["id"], *labels, confidence, per_page, offset)).fetchall()
 
         detections = [{
             "id": r["id"], "frame_id": r["frame_id"], "label": r["label"],
