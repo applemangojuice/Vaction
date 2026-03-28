@@ -1,0 +1,281 @@
+{% extends "base.html" %}
+{% block title %}Insights — Vaction{% endblock %}
+{% block content %}
+<h1>Insights</h1>
+<p class="subtitle">Auto-generated analysis: top labels, trends, anomalies, and visual storytelling</p>
+
+<div class="card">
+    <div class="row">
+        <div class="form-group">
+            <label>Series</label>
+            <select id="seriesSelect" onchange="loadInsights()"><option value="">Loading...</option></select>
+        </div>
+        <div class="form-group" style="flex:0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="btn" onclick="loadInsights()">Analyze</button>
+        </div>
+    </div>
+</div>
+
+<div id="insightsContent" style="display:none;">
+
+<!-- Executive Summary -->
+<div class="card" id="summaryCard">
+    <h2>Executive Summary</h2>
+    <div class="grid-2" id="summaryStats"></div>
+    <div id="summaryNarrative" style="margin-top:16px; color:#aaa; font-size:14px; line-height:1.6;"></div>
+</div>
+
+<!-- Top Labels -->
+<div class="card">
+    <h2>Most Detected Labels</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">Top 20 labels by total detection count across all episodes</p>
+    <div id="topLabelsChart" style="width:100%; height:400px;"></div>
+    <div style="margin-top:16px;">
+        <table>
+            <thead><tr><th>Label</th><th style="text-align:right;">Detections</th><th style="text-align:right;">Avg Confidence</th><th style="text-align:right;">Episodes</th><th style="text-align:right;">Coverage</th></tr></thead>
+            <tbody id="topLabelsTable"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Trends -->
+<div class="card" id="trendsCard">
+    <h2>Trending Up</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">Labels that appear significantly more in later episodes</p>
+    <div id="trendingChart" style="width:100%; height:300px;"></div>
+    <div id="trendingList" style="margin-top:12px;"></div>
+</div>
+
+<div class="card" id="decliningCard">
+    <h2>Declining</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">Labels that appear less frequently in later episodes</p>
+    <div id="decliningChart" style="width:100%; height:300px;"></div>
+    <div id="decliningList" style="margin-top:12px;"></div>
+</div>
+
+<!-- Spikes -->
+<div class="card" id="spikesCard">
+    <h2>Notable Spikes</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">Labels with a single episode far above their average — key moments</p>
+    <div id="spikesTable"></div>
+</div>
+
+<!-- Episode Complexity -->
+<div class="card">
+    <h2>Episode Complexity</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">Number of unique visual elements detected per episode — higher = more visually diverse</p>
+    <div id="complexityChart" style="width:100%; height:300px;"></div>
+</div>
+
+<!-- Story Builder -->
+<div class="card">
+    <h2>Story Narrative</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">Auto-generated consulting-style narrative based on the data patterns</p>
+    <div id="storyNarrative" style="color:#ccc; font-size:14px; line-height:1.8;"></div>
+</div>
+
+</div><!-- insightsContent -->
+
+<div id="loadingMsg" style="display:none; text-align:center; padding:40px; color:#666;">
+    Analyzing series data...
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PLOTLY_DARK = {
+    paper_bgcolor: '#141414', plot_bgcolor: '#141414',
+    font: { color: '#ccc', family: '-apple-system, sans-serif', size: 12 },
+    margin: { t: 30, r: 20, b: 50, l: 60 },
+    legend: { bgcolor: 'rgba(0,0,0,0)', font: { size: 11 } },
+    xaxis: { gridcolor: '#1a1a1a' },
+    yaxis: { gridcolor: '#1a1a1a' },
+};
+const COLORS = ['#4a9eff','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#e599f7','#74c0fc','#f06595'];
+
+fetch('/api/series').then(r=>r.json()).then(data=>{
+    const sel = document.getElementById('seriesSelect');
+    sel.innerHTML = '';
+    if (!data.series.length) { sel.innerHTML = '<option value="">No series</option>'; return; }
+    data.series.forEach(s => sel.innerHTML += `<option value="${s.name}">${s.name}</option>`);
+    loadInsights();
+});
+
+function loadInsights() {
+    const series = document.getElementById('seriesSelect').value;
+    if (!series) return;
+
+    document.getElementById('loadingMsg').style.display = '';
+    document.getElementById('insightsContent').style.display = 'none';
+
+    fetch(`/api/insights?series=${encodeURIComponent(series)}`).then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('loadingMsg').style.display = 'none';
+        document.getElementById('insightsContent').style.display = '';
+        renderInsights(data);
+    });
+}
+
+function renderInsights(data) {
+    // Summary stats
+    document.getElementById('summaryStats').innerHTML = `
+        <div><div class="stat-value">${data.total_episodes}</div><div class="stat-label">Episodes</div></div>
+        <div><div class="stat-value">${data.total_labels}</div><div class="stat-label">Unique Labels Detected</div></div>
+        <div><div class="stat-value">${data.top_labels.length > 0 ? data.top_labels[0].label : '-'}</div><div class="stat-label">Most Frequent Label</div></div>
+        <div><div class="stat-value">${data.trending.length + data.declining.length}</div><div class="stat-label">Labels with Trends</div></div>
+    `;
+
+    // Top labels bar chart
+    if (data.top_labels.length) {
+        const labels = data.top_labels.map(l => l.label).reverse();
+        const counts = data.top_labels.map(l => l.count).reverse();
+        const colors = data.top_labels.map((_, i) => COLORS[i % COLORS.length]).reverse();
+
+        Plotly.newPlot('topLabelsChart', [{
+            type: 'bar', orientation: 'h',
+            y: labels, x: counts,
+            marker: { color: colors },
+            hovertemplate: '%{y}: %{x} detections<extra></extra>',
+        }], {...PLOTLY_DARK, margin: {t: 10, r: 20, b: 40, l: 120}, yaxis: {gridcolor: '#1a1a1a'}}, {responsive: true});
+
+        document.getElementById('topLabelsTable').innerHTML = data.top_labels.map(l =>
+            `<tr><td><span class="tag">${l.label}</span></td>
+             <td style="text-align:right;">${l.count.toLocaleString()}</td>
+             <td style="text-align:right;">${l.avg_confidence}</td>
+             <td style="text-align:right;">${l.episode_count}/${data.total_episodes}</td>
+             <td style="text-align:right;">${l.coverage}%</td></tr>`
+        ).join('');
+    }
+
+    // Trending chart
+    if (data.trending.length) {
+        const traces = data.trending.map((t, i) => ({
+            type: 'scatter', mode: 'lines+markers',
+            x: data.episodes, y: t.shares,
+            name: `${t.label} (+${t.change}%)`,
+            line: { color: COLORS[i % COLORS.length], width: 2 },
+            marker: { size: 5 },
+        }));
+        Plotly.newPlot('trendingChart', traces, {...PLOTLY_DARK, yaxis: {...PLOTLY_DARK.yaxis, title: {text: 'Episode Share (%)'}}}, {responsive: true});
+        document.getElementById('trendingList').innerHTML = data.trending.map(t =>
+            `<div style="padding:4px 0; font-size:13px;"><span class="tag">${t.label}</span> <span style="color:#51cf66; margin-left:8px;">+${t.change}%</span> increase from first half to second half</div>`
+        ).join('');
+    } else {
+        document.getElementById('trendsCard').style.display = 'none';
+    }
+
+    // Declining chart
+    if (data.declining.length) {
+        const traces = data.declining.map((t, i) => ({
+            type: 'scatter', mode: 'lines+markers',
+            x: data.episodes, y: t.shares,
+            name: `${t.label} (-${t.change}%)`,
+            line: { color: COLORS[(i + 5) % COLORS.length], width: 2, dash: 'dot' },
+            marker: { size: 5 },
+        }));
+        Plotly.newPlot('decliningChart', traces, {...PLOTLY_DARK, yaxis: {...PLOTLY_DARK.yaxis, title: {text: 'Episode Share (%)'}}}, {responsive: true});
+        document.getElementById('decliningList').innerHTML = data.declining.map(t =>
+            `<div style="padding:4px 0; font-size:13px;"><span class="tag">${t.label}</span> <span style="color:#ff6b6b; margin-left:8px;">-${t.change}%</span> decrease from first half to second half</div>`
+        ).join('');
+    } else {
+        document.getElementById('decliningCard').style.display = 'none';
+    }
+
+    // Spikes
+    if (data.spiky.length) {
+        document.getElementById('spikesTable').innerHTML = '<table><thead><tr><th>Label</th><th>Peak Episode</th><th style="text-align:right;">Peak Value</th><th style="text-align:right;">Avg Value</th><th style="text-align:right;">Spike Ratio</th></tr></thead><tbody>' +
+            data.spiky.map(s => {
+                const ratio = (s.peak_value / s.avg_value).toFixed(1);
+                return `<tr><td><span class="tag">${s.label}</span></td><td><strong>${s.peak_episode}</strong></td><td style="text-align:right;">${s.peak_value}%</td><td style="text-align:right;">${s.avg_value}%</td><td style="text-align:right; color:#ffd43b;">${ratio}x</td></tr>`;
+            }).join('') + '</tbody></table>';
+    } else {
+        document.getElementById('spikesCard').style.display = 'none';
+    }
+
+    // Episode complexity
+    if (data.episode_complexity.length) {
+        const epCodes = data.episode_complexity.map(e => e.code);
+        const complexity = data.episode_complexity.map(e => e.unique_labels);
+        const avgComplexity = complexity.reduce((a, b) => a + b, 0) / complexity.length;
+
+        Plotly.newPlot('complexityChart', [
+            {
+                type: 'bar', x: epCodes, y: complexity,
+                marker: { color: complexity.map(c => c > avgComplexity * 1.3 ? '#ff6b6b' : c < avgComplexity * 0.7 ? '#4a9eff' : '#51cf66') },
+                hovertemplate: '%{x}: %{y} labels<extra></extra>',
+            },
+            {
+                type: 'scatter', mode: 'lines', x: epCodes,
+                y: Array(epCodes.length).fill(avgComplexity),
+                name: `Average (${avgComplexity.toFixed(0)})`,
+                line: { color: '#888', dash: 'dash', width: 1 },
+            }
+        ], {...PLOTLY_DARK, showlegend: true, yaxis: {...PLOTLY_DARK.yaxis, title: {text: 'Unique Labels'}}}, {responsive: true});
+    }
+
+    // Story narrative
+    buildStory(data);
+}
+
+function buildStory(data) {
+    const el = document.getElementById('storyNarrative');
+    let story = '';
+
+    story += `<p><strong>Overview:</strong> The series "${data.series}" contains <strong>${data.total_episodes} episodes</strong> with <strong>${data.total_labels} unique visual elements</strong> detected across all frames.</p>`;
+
+    if (data.top_labels.length >= 3) {
+        const top3 = data.top_labels.slice(0, 3).map(l => `<strong>${l.label}</strong> (${l.count.toLocaleString()} detections, ${l.coverage}% coverage)`);
+        story += `<p><strong>Dominant Elements:</strong> The most prevalent visual elements are ${top3.join(', ')}. `;
+        const highCov = data.top_labels.filter(l => l.coverage >= 80);
+        if (highCov.length > 0) {
+            story += `${highCov.map(l => `<strong>${l.label}</strong>`).join(', ')} appear${highCov.length === 1 ? 's' : ''} in 80%+ of episodes, forming the visual backbone of the series.`;
+        }
+        story += '</p>';
+    }
+
+    if (data.trending.length > 0) {
+        story += '<p><strong>Rising Themes:</strong> ';
+        data.trending.forEach(t => {
+            story += `<strong>${t.label}</strong> shows a ${t.change}% increase in the second half of the series. `;
+        });
+        story += 'These rising elements may indicate evolving storylines or escalating tension.</p>';
+    }
+
+    if (data.declining.length > 0) {
+        story += '<p><strong>Fading Elements:</strong> ';
+        data.declining.forEach(t => {
+            story += `<strong>${t.label}</strong> declines by ${t.change}%. `;
+        });
+        story += 'This decline could reflect shifting settings or resolved plot threads.</p>';
+    }
+
+    if (data.spiky.length > 0) {
+        story += '<p><strong>Key Moments:</strong> ';
+        data.spiky.forEach(s => {
+            const ratio = (s.peak_value / s.avg_value).toFixed(1);
+            story += `<strong>${s.label}</strong> spikes ${ratio}x above average in <strong>${s.peak_episode}</strong>. `;
+        });
+        story += 'These concentrated appearances likely correspond to pivotal scenes or set-piece sequences.</p>';
+    }
+
+    if (data.episode_complexity.length > 2) {
+        const complexities = data.episode_complexity.map(e => e.unique_labels);
+        const maxC = Math.max(...complexities);
+        const minC = Math.min(...complexities);
+        const maxEp = data.episode_complexity[complexities.indexOf(maxC)];
+        const minEp = data.episode_complexity[complexities.indexOf(minC)];
+        story += `<p><strong>Visual Complexity:</strong> The most visually diverse episode is <strong>${maxEp.code}</strong>${maxEp.title ? ' ("' + maxEp.title + '")' : ''} with ${maxC} unique labels. The simplest is <strong>${minEp.code}</strong>${minEp.title ? ' ("' + minEp.title + '")' : ''} with ${minC} labels. `;
+        const variance = complexities.reduce((sum, c) => sum + Math.pow(c - complexities.reduce((a, b) => a + b, 0) / complexities.length, 2), 0) / complexities.length;
+        if (Math.sqrt(variance) > 5) {
+            story += 'The high variance in complexity suggests episodic structure with distinct visual identities per episode.';
+        } else {
+            story += 'The consistent complexity suggests uniform visual language across the series.';
+        }
+        story += '</p>';
+    }
+
+    el.innerHTML = story;
+}
+</script>
+{% endblock %}

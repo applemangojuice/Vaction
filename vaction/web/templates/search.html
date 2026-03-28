@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block title %}Search & Charts — Vaction{% endblock %}
+{% block content %}
+<h1>Search & Charts</h1>
+<p class="subtitle">Search by terms, view episode share percentages, and chart trends across episodes</p>
+
+<!-- Search -->
+<div class="card">
+    <h2>Search</h2>
+    <div class="row">
+        <div class="form-group">
+            <label>Series</label>
+            <select id="seriesSelect"><option value="">Loading...</option></select>
+        </div>
+        <div class="form-group" style="flex:2;">
+            <label>Query</label>
+            <input type="text" id="queryInput" placeholder='e.g. person, hallway, mark AND office, vehicle OR elevator' />
+        </div>
+        <div class="form-group" style="flex:0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="btn" onclick="runSearch()">Search</button>
+        </div>
+    </div>
+    <div id="labelHints" class="pill-row" style="margin-top:8px;"></div>
+</div>
+
+<!-- Results Table -->
+<div class="card hidden" id="resultsCard">
+    <h2>Results: <span id="resultsQuery"></span></h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Episode</th>
+                <th>Title</th>
+                <th style="text-align:right;">Episode Share</th>
+                <th style="text-align:right;">Pixel-Time (sec)</th>
+                <th>Strongest Windows</th>
+            </tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+    </table>
+</div>
+
+<!-- Chart Builder -->
+<div class="card">
+    <h2>Trend Chart</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">Compare one or more search terms across episodes</p>
+    <div class="row">
+        <div class="form-group" style="flex:2;">
+            <label>Terms (comma-separated)</label>
+            <input type="text" id="chartTerms" placeholder='e.g. person, hallway, office' />
+        </div>
+        <div class="form-group" style="flex:0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="btn" onclick="buildChart()">Build Chart</button>
+        </div>
+    </div>
+    <div class="chart-container">
+        <canvas id="trendChart"></canvas>
+    </div>
+</div>
+
+<!-- Pivot Table -->
+<div class="card hidden" id="pivotCard">
+    <h2>Pivot Table</h2>
+    <div style="overflow-x:auto;">
+        <table id="pivotTable">
+            <thead id="pivotHead"></thead>
+            <tbody id="pivotBody"></tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let trendChart = null;
+const COLORS = [
+    '#4a9eff','#ff6b6b','#51cf66','#ffd43b','#cc5de8',
+    '#ff922b','#20c997','#e599f7','#74c0fc','#f06595',
+];
+
+// Load series
+fetch('/api/series').then(r=>r.json()).then(data=>{
+    const sel = document.getElementById('seriesSelect');
+    sel.innerHTML = '';
+    if (!data.series.length) {
+        sel.innerHTML = '<option value="">No series — add videos first</option>';
+        return;
+    }
+    data.series.forEach(s=>{
+        sel.innerHTML += `<option value="${s.name}">${s.name}</option>`;
+    });
+    loadLabels();
+});
+
+document.getElementById('seriesSelect').addEventListener('change', loadLabels);
+
+function loadLabels() {
+    const series = document.getElementById('seriesSelect').value;
+    if (!series) return;
+    fetch('/api/labels?series=' + encodeURIComponent(series)).then(r=>r.json()).then(data=>{
+        const el = document.getElementById('labelHints');
+        el.innerHTML = data.labels.slice(0, 30).map(l =>
+            `<span class="pill" onclick="insertTerm('${l.label}')">${l.label} <span style="opacity:0.5">(${l.count})</span></span>`
+        ).join('');
+    });
+}
+
+function insertTerm(term) {
+    const input = document.getElementById('queryInput');
+    input.value = term;
+    input.focus();
+}
+
+// Search
+function runSearch() {
+    const series = document.getElementById('seriesSelect').value;
+    const q = document.getElementById('queryInput').value.trim();
+    if (!series || !q) { alert('Select a series and enter a query.'); return; }
+
+    fetch(`/api/search?series=${encodeURIComponent(series)}&q=${encodeURIComponent(q)}`)
+    .then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+
+        document.getElementById('resultsCard').classList.remove('hidden');
+        document.getElementById('resultsQuery').textContent = `"${data.query}"`;
+
+        const tbody = document.getElementById('resultsBody');
+        tbody.innerHTML = '';
+        data.results.forEach(r=>{
+            const windows = r.strongest_windows.map(w => `${w.start}-${w.end}`).join(', ') || '-';
+            const barWidth = Math.min(r.episode_share_pct * 5, 100); // scale for visibility
+            tbody.innerHTML += `<tr>
+                <td><strong>S${String(r.season).padStart(2,'0')}E${String(r.episode).padStart(2,'0')}</strong></td>
+                <td>${r.title || ''}</td>
+                <td style="text-align:right;">
+                    <div style="display:flex; align-items:center; justify-content:flex-end; gap:8px;">
+                        <div style="width:60px; height:6px; background:#222; border-radius:3px; overflow:hidden;">
+                            <div style="width:${barWidth}%; height:100%; background:#4a9eff; border-radius:3px;"></div>
+                        </div>
+                        <span>${r.episode_share_pct.toFixed(4)}%</span>
+                    </div>
+                </td>
+                <td style="text-align:right;">${r.pixel_time.toLocaleString()}</td>
+                <td style="font-size:12px; color:#888;">${windows}</td>
+            </tr>`;
+        });
+
+        // Auto-populate chart terms
+        if (!document.getElementById('chartTerms').value) {
+            document.getElementById('chartTerms').value = q;
+        }
+    });
+}
+
+// Enter key triggers search
+document.getElementById('queryInput').addEventListener('keydown', e=>{
+    if (e.key === 'Enter') runSearch();
+});
+
+// Chart
+function buildChart() {
+    const series = document.getElementById('seriesSelect').value;
+    const terms = document.getElementById('chartTerms').value.trim();
+    if (!series || !terms) { alert('Select a series and enter terms.'); return; }
+
+    fetch(`/api/chart?series=${encodeURIComponent(series)}&terms=${encodeURIComponent(terms)}`)
+    .then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+
+        const ctx = document.getElementById('trendChart').getContext('2d');
+        if (trendChart) trendChart.destroy();
+
+        trendChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: data.labels,
+                datasets: data.datasets.map((ds, i) => ({
+                    label: ds.term,
+                    data: ds.data,
+                    borderColor: COLORS[i % COLORS.length],
+                    backgroundColor: COLORS[i % COLORS.length] + '22',
+                    tension: 0.3,
+                    fill: true,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    borderWidth: 2,
+                })),
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: { color: '#ccc', font: { size: 12 } }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(4)}%`
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        ticks: { color: '#888', font: { size: 11 } },
+                        grid: { color: '#1a1a1a' },
+                    },
+                    y: {
+                        title: { display: true, text: 'Episode Share (%)', color: '#888' },
+                        ticks: {
+                            color: '#888',
+                            callback: v => v.toFixed(3) + '%',
+                        },
+                        grid: { color: '#1a1a1a' },
+                        beginAtZero: true,
+                    },
+                },
+            },
+        });
+
+        // Build pivot table
+        buildPivotTable(data);
+    });
+}
+
+function buildPivotTable(data) {
+    document.getElementById('pivotCard').classList.remove('hidden');
+
+    const head = document.getElementById('pivotHead');
+    const body = document.getElementById('pivotBody');
+
+    // Header row: Episode | term1 | term2 | ...
+    let headerHtml = '<tr><th>Episode</th>';
+    data.datasets.forEach(ds => {
+        headerHtml += `<th style="text-align:right;">${ds.term}</th>`;
+    });
+    headerHtml += '</tr>';
+    head.innerHTML = headerHtml;
+
+    // Data rows
+    body.innerHTML = '';
+    data.labels.forEach((label, i) => {
+        let row = `<tr><td><strong>${label}</strong></td>`;
+        data.datasets.forEach(ds => {
+            const val = ds.data[i];
+            const bg = val > 0 ? `rgba(74,158,255,${Math.min(val * 10, 0.3)})` : 'transparent';
+            row += `<td style="text-align:right; background:${bg};">${val.toFixed(4)}%</td>`;
+        });
+        row += '</tr>';
+        body.innerHTML += row;
+    });
+}
+</script>
+{% endblock %}

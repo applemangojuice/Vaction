@@ -1,0 +1,330 @@
+{% extends "base.html" %}
+{% block title %}Charts — Vaction{% endblock %}
+{% block content %}
+<h1>Advanced Charts</h1>
+<p class="subtitle">Tableau-style charting: stacked bars, 100% stacked, breakdown by theme labels, multi-axis</p>
+
+<!-- Controls Row -->
+<div class="card">
+    <h2>Configuration</h2>
+    <div class="row" style="flex-wrap:wrap;">
+        <div class="form-group">
+            <label>Series</label>
+            <select id="seriesSelect" onchange="onSeriesChange()"><option value="">Loading...</option></select>
+        </div>
+        <div class="form-group">
+            <label>Chart Type</label>
+            <select id="chartType">
+                <option value="grouped_bar">Grouped Bar</option>
+                <option value="stacked_bar">Stacked Bar</option>
+                <option value="stacked_100">100% Stacked Bar</option>
+                <option value="line">Line Chart</option>
+                <option value="area">Stacked Area</option>
+                <option value="heatmap">Heatmap</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Color By</label>
+            <select id="colorBy">
+                <option value="term">Term / Theme (aggregate)</option>
+                <option value="label">Individual Labels (breakdown)</option>
+            </select>
+        </div>
+    </div>
+</div>
+
+<!-- Terms Selection -->
+<div class="card">
+    <h2>Terms & Themes</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:8px;">
+        Select terms or themes. When "Color By: Individual Labels" is selected, themes are broken into their component labels.
+    </p>
+    <div class="row">
+        <div class="form-group" style="flex:3;">
+            <input type="text" id="chartTerms" placeholder="e.g. person, hallway, vehicles, danger" />
+        </div>
+        <div class="form-group" style="flex:0 0 auto;">
+            <button class="btn" onclick="buildChart()">Build Chart</button>
+        </div>
+    </div>
+    <div id="termHints" class="pill-row" style="margin-top:4px;"></div>
+    <div id="themeHints" class="pill-row" style="margin-top:8px;"></div>
+</div>
+
+<!-- Episode Filter -->
+<div class="card">
+    <h2>Episode Filter <span style="color:#666; font-size:13px; font-weight:normal;">(leave unchecked for all)</span></h2>
+    <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <button class="btn btn-secondary" style="font-size:12px; padding:4px 12px;" onclick="selectAllEps(true)">All</button>
+        <button class="btn btn-secondary" style="font-size:12px; padding:4px 12px;" onclick="selectAllEps(false)">None</button>
+    </div>
+    <div id="episodeChecks" class="pill-row" style="gap:4px;"></div>
+</div>
+
+<!-- Chart Output -->
+<div class="card" id="chartCard" style="display:none;">
+    <div id="plotlyChart" style="width:100%; height:500px;"></div>
+</div>
+
+<!-- Data Table -->
+<div class="card" id="tableCard" style="display:none;">
+    <h2>Data Table</h2>
+    <div style="overflow-x:auto;">
+        <table id="dataTable">
+            <thead id="dataHead"></thead>
+            <tbody id="dataBody"></tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const COLORS = [
+    '#4a9eff','#ff6b6b','#51cf66','#ffd43b','#cc5de8',
+    '#ff922b','#20c997','#e599f7','#74c0fc','#f06595',
+    '#a9e34b','#63e6be','#ffa94d','#da77f2','#69db7c',
+    '#38d9a9','#ff8787','#748ffc','#66d9e8','#e599f7',
+];
+const PLOTLY_LAYOUT = {
+    paper_bgcolor: '#141414',
+    plot_bgcolor: '#141414',
+    font: { color: '#ccc', family: '-apple-system, BlinkMacSystemFont, sans-serif', size: 12 },
+    margin: { t: 40, r: 20, b: 60, l: 60 },
+    legend: { bgcolor: 'rgba(0,0,0,0)', font: { size: 11 } },
+    xaxis: { gridcolor: '#1a1a1a', tickfont: { size: 11 } },
+    yaxis: { gridcolor: '#1a1a1a', tickfont: { size: 11 }, title: { text: 'Episode Share (%)' } },
+};
+
+let allEpisodes = [];
+
+fetch('/api/series').then(r=>r.json()).then(data=>{
+    const sel = document.getElementById('seriesSelect');
+    sel.innerHTML = '';
+    if (!data.series.length) { sel.innerHTML = '<option value="">No series</option>'; return; }
+    data.series.forEach(s => sel.innerHTML += `<option value="${s.name}">${s.name}</option>`);
+    onSeriesChange();
+});
+
+function onSeriesChange() {
+    const series = document.getElementById('seriesSelect').value;
+    if (!series) return;
+    fetch('/api/episodes?series=' + encodeURIComponent(series)).then(r=>r.json()).then(data=>{
+        allEpisodes = data.episodes;
+        document.getElementById('episodeChecks').innerHTML = data.episodes.map(ep =>
+            `<label style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;background:#1a1a1a;border-radius:6px;font-size:12px;color:#ccc;cursor:pointer;">
+                <input type="checkbox" class="ep-check" value="${ep.code}" checked style="cursor:pointer;" />${ep.code}</label>`
+        ).join('');
+    });
+    fetch('/api/labels?series=' + encodeURIComponent(series)).then(r=>r.json()).then(data=>{
+        document.getElementById('termHints').innerHTML = data.labels.slice(0, 30).map(l =>
+            `<span class="pill" onclick="addTerm('${l.label}')">${l.label} <span style="opacity:0.5">(${l.count})</span></span>`
+        ).join('');
+    });
+    fetch('/api/themes').then(r=>r.json()).then(data=>{
+        document.getElementById('themeHints').innerHTML = data.themes.map(t =>
+            `<span class="pill" style="background:#2a1a3a;color:#cc5de8;" onclick="addTerm('${t.name}')">${t.name} <span style="opacity:0.5">(theme: ${t.labels.length})</span></span>`
+        ).join('');
+    });
+}
+
+function addTerm(term) {
+    const input = document.getElementById('chartTerms');
+    const current = input.value.trim();
+    const existing = current ? current.split(',').map(t=>t.trim().toLowerCase()) : [];
+    if (existing.includes(term.toLowerCase())) return;
+    input.value = current ? current + ', ' + term : term;
+}
+
+function selectAllEps(checked) {
+    document.querySelectorAll('.ep-check').forEach(cb => cb.checked = checked);
+}
+
+function getSelectedEpisodes() {
+    const checks = document.querySelectorAll('.ep-check:checked');
+    const all = document.querySelectorAll('.ep-check');
+    if (checks.length === all.length || checks.length === 0) return '';
+    return Array.from(checks).map(cb => cb.value).join(',');
+}
+
+function buildChart() {
+    const series = document.getElementById('seriesSelect').value;
+    const terms = document.getElementById('chartTerms').value.trim();
+    const chartType = document.getElementById('chartType').value;
+    const colorBy = document.getElementById('colorBy').value;
+    const episodes = getSelectedEpisodes();
+
+    if (!series || !terms) { alert('Select a series and enter terms.'); return; }
+
+    // Use breakdown endpoint for label-level coloring, regular for aggregate
+    const useBreakdown = colorBy === 'label';
+    let url;
+    if (useBreakdown) {
+        url = `/api/chart/breakdown?series=${encodeURIComponent(series)}&terms=${encodeURIComponent(terms)}`;
+    } else {
+        url = `/api/chart?series=${encodeURIComponent(series)}&terms=${encodeURIComponent(terms)}`;
+    }
+    if (episodes) url += `&episodes=${encodeURIComponent(episodes)}`;
+
+    fetch(url).then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('chartCard').style.display = '';
+
+        if (useBreakdown) {
+            renderBreakdownChart(data, chartType);
+        } else {
+            renderAggregateChart(data, chartType);
+        }
+    });
+}
+
+function renderAggregateChart(data, chartType) {
+    const traces = [];
+    const x = data.labels;
+
+    data.datasets.forEach((ds, i) => {
+        const color = COLORS[i % COLORS.length];
+        const trace = { x: x, y: ds.data, name: ds.term };
+
+        if (chartType === 'line') {
+            trace.type = 'scatter'; trace.mode = 'lines+markers';
+            trace.line = { color: color, width: 2 };
+            trace.marker = { color: color, size: 6 };
+        } else if (chartType === 'area') {
+            trace.type = 'scatter'; trace.mode = 'lines';
+            trace.fill = 'tonexty'; trace.stackgroup = 'one';
+            trace.line = { color: color };
+        } else if (chartType === 'heatmap') {
+            // handled separately
+        } else {
+            trace.type = 'bar';
+            trace.marker = { color: color };
+        }
+        traces.push(trace);
+    });
+
+    const layout = JSON.parse(JSON.stringify(PLOTLY_LAYOUT));
+
+    if (chartType === 'stacked_bar' || chartType === 'stacked_100') {
+        layout.barmode = 'stack';
+    } else if (chartType === 'grouped_bar') {
+        layout.barmode = 'group';
+    }
+
+    if (chartType === 'heatmap') {
+        const zData = data.datasets.map(ds => ds.data);
+        const yLabels = data.datasets.map(ds => ds.term);
+        Plotly.newPlot('plotlyChart', [{
+            type: 'heatmap', z: zData, x: x, y: yLabels,
+            colorscale: [[0, '#0a0a0a'], [0.5, '#1a73e8'], [1, '#ff6b6b']],
+            hovertemplate: '%{y}: %{z:.4f}%<extra>%{x}</extra>',
+        }], layout, {responsive: true});
+    } else if (chartType === 'stacked_100') {
+        // Normalize to 100%
+        for (let j = 0; j < x.length; j++) {
+            const total = traces.reduce((sum, t) => sum + (t.y[j] || 0), 0);
+            if (total > 0) {
+                traces.forEach(t => { t.y[j] = (t.y[j] / total) * 100; });
+            }
+        }
+        layout.yaxis.title.text = 'Share of Total (%)';
+        layout.yaxis.range = [0, 100];
+        Plotly.newPlot('plotlyChart', traces, layout, {responsive: true});
+    } else {
+        Plotly.newPlot('plotlyChart', traces, layout, {responsive: true});
+    }
+
+    buildDataTable(data.labels, data.datasets.map(ds => ({label: ds.term, data: ds.data})));
+}
+
+function renderBreakdownChart(data, chartType) {
+    const traces = [];
+    const x = data.episodes;
+    let colorIdx = 0;
+
+    data.groups.forEach(group => {
+        group.labels.forEach(labelInfo => {
+            const color = COLORS[colorIdx % COLORS.length];
+            colorIdx++;
+            const trace = {
+                x: x, y: labelInfo.data,
+                name: group.labels.length > 1 ? `${group.name}: ${labelInfo.label}` : labelInfo.label,
+            };
+
+            if (chartType === 'line') {
+                trace.type = 'scatter'; trace.mode = 'lines+markers';
+                trace.line = { color: color, width: 2 };
+            } else if (chartType === 'area') {
+                trace.type = 'scatter'; trace.mode = 'lines';
+                trace.fill = 'tonexty'; trace.stackgroup = 'one';
+                trace.line = { color: color };
+            } else {
+                trace.type = 'bar';
+                trace.marker = { color: color };
+            }
+            traces.push(trace);
+        });
+    });
+
+    const layout = JSON.parse(JSON.stringify(PLOTLY_LAYOUT));
+    if (chartType === 'stacked_bar' || chartType === 'stacked_100') {
+        layout.barmode = 'stack';
+    } else if (chartType === 'grouped_bar') {
+        layout.barmode = 'group';
+    }
+
+    if (chartType === 'heatmap') {
+        const zData = []; const yLabels = [];
+        data.groups.forEach(g => g.labels.forEach(l => {
+            zData.push(l.data);
+            yLabels.push(g.labels.length > 1 ? `${g.name}: ${l.label}` : l.label);
+        }));
+        Plotly.newPlot('plotlyChart', [{
+            type: 'heatmap', z: zData, x: x, y: yLabels,
+            colorscale: [[0, '#0a0a0a'], [0.5, '#1a73e8'], [1, '#ff6b6b']],
+            hovertemplate: '%{y}: %{z:.4f}%<extra>%{x}</extra>',
+        }], layout, {responsive: true});
+    } else if (chartType === 'stacked_100') {
+        for (let j = 0; j < x.length; j++) {
+            const total = traces.reduce((sum, t) => sum + (t.y[j] || 0), 0);
+            if (total > 0) traces.forEach(t => { t.y[j] = (t.y[j] / total) * 100; });
+        }
+        layout.yaxis.title.text = 'Share of Total (%)';
+        layout.yaxis.range = [0, 100];
+        Plotly.newPlot('plotlyChart', traces, layout, {responsive: true});
+    } else {
+        Plotly.newPlot('plotlyChart', traces, layout, {responsive: true});
+    }
+
+    // Build flat table
+    const allLabels = [];
+    data.groups.forEach(g => g.labels.forEach(l => {
+        allLabels.push({label: g.labels.length > 1 ? `${g.name}: ${l.label}` : l.label, data: l.data});
+    }));
+    buildDataTable(data.episodes, allLabels);
+}
+
+function buildDataTable(episodes, columns) {
+    document.getElementById('tableCard').style.display = '';
+    const head = document.getElementById('dataHead');
+    const body = document.getElementById('dataBody');
+
+    head.innerHTML = '<tr><th>Episode</th>' + columns.map(c => `<th style="text-align:right;">${c.label}</th>`).join('') + '</tr>';
+
+    body.innerHTML = '';
+    episodes.forEach((ep, i) => {
+        let row = `<tr><td><strong>${ep}</strong></td>`;
+        columns.forEach(c => {
+            const val = c.data[i] || 0;
+            const bg = val > 0 ? `rgba(74,158,255,${Math.min(val * 10, 0.3)})` : 'transparent';
+            row += `<td style="text-align:right; background:${bg};">${val.toFixed(4)}%</td>`;
+        });
+        body.innerHTML += row + '</tr>';
+    });
+}
+
+document.getElementById('chartTerms').addEventListener('keydown', e=>{
+    if (e.key === 'Enter') buildChart();
+});
+</script>
+{% endblock %}

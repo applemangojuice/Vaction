@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Status — Vaction{% endblock %}
+{% block content %}
+<h1>Status</h1>
+<p class="subtitle">Overview of all indexed content and data storage</p>
+
+<!-- Data Persistence -->
+<div class="card">
+    <h2>Data Storage</h2>
+    <div id="dataInfo" style="color:#666;">Loading...</div>
+    <div style="margin-top:12px; display:flex; gap:8px;">
+        <button class="btn btn-secondary" onclick="createBackup()">Create Backup</button>
+    </div>
+    <div id="backupResult" style="margin-top:8px;"></div>
+    <div id="backupsList" style="margin-top:12px;"></div>
+</div>
+
+<div id="statusContent">
+    <div class="card"><p style="color:#666;">Loading...</p></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Data info
+fetch('/api/data-info').then(r=>r.json()).then(data=>{
+    document.getElementById('dataInfo').innerHTML = `
+        <div class="grid-2" style="margin-bottom:8px;">
+            <div><div class="stat-value" style="font-size:20px;">${data.db_size_mb} MB</div><div class="stat-label">Database</div></div>
+            <div><div class="stat-value" style="font-size:20px;">${data.frames_size_mb} MB</div><div class="stat-label">Frames</div></div>
+        </div>
+        <p style="font-size:13px; color:#666; margin-top:8px;">
+            <strong>Database:</strong> ${data.db_path}<br>
+            <strong>Frames:</strong> ${data.frames_dir}<br>
+            <strong>Data directory:</strong> ${data.data_dir}<br>
+            <br>
+            Your data persists across code updates. The database and frames are stored in <code style="background:#1a1a1a; padding:2px 6px; border-radius:3px;">~/.vaction/</code>,
+            separate from the git repository. Updating the code (git pull) will not affect your indexed data.
+        </p>
+    `;
+});
+
+// Backups
+function loadBackups() {
+    fetch('/api/backups').then(r=>r.json()).then(data=>{
+        const el = document.getElementById('backupsList');
+        if (!data.backups.length) { el.innerHTML = ''; return; }
+        let html = '<p style="font-size:12px; color:#666; margin-bottom:4px;">Previous backups:</p>';
+        data.backups.slice(0, 5).forEach(b => {
+            const date = new Date(b.modified * 1000).toLocaleString();
+            html += `<div style="font-size:12px; color:#888; padding:2px 0;">${b.name} (${b.size_mb} MB) — ${date}</div>`;
+        });
+        el.innerHTML = html;
+    });
+}
+
+function createBackup() {
+    fetch('/api/backup', {method:'POST'}).then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('backupResult').innerHTML =
+            `<span style="color:#51cf66; font-size:13px;">Backup created: ${data.backup_path} (${data.size_mb} MB)</span>`;
+        loadBackups();
+    });
+}
+loadBackups();
+
+// Series status
+fetch('/api/status').then(r=>r.json()).then(data=>{
+    const el = document.getElementById('statusContent');
+
+    if (!data.series.length) {
+        el.innerHTML = '<div class="card"><p style="color:#666;">No data yet. <a href="/add-videos" style="color:#4a9eff;">Add some videos</a> to get started.</p></div>';
+        return;
+    }
+
+    let html = '';
+    data.series.forEach(s => {
+        html += `<div class="card">
+            <h2>${s.name}</h2>
+            <p style="color:#666; font-size:13px; margin-bottom:16px;">${s.path}</p>
+            <div class="grid-2" style="margin-bottom:20px;">
+                <div><div class="stat-value">${s.total_episodes}</div><div class="stat-label">Episodes</div></div>
+                <div><div class="stat-value">${s.total_frames.toLocaleString()}</div><div class="stat-label">Frames</div></div>
+                <div><div class="stat-value">${s.total_detections.toLocaleString()}</div><div class="stat-label">Detections</div></div>
+                <div><div class="stat-value">${s.total_detections > 0 && s.total_frames > 0 ? (s.total_detections / s.total_frames).toFixed(1) : '0'}</div><div class="stat-label">Avg Detections/Frame</div></div>
+            </div>`;
+
+        if (s.episodes.length) {
+            html += `<table>
+                <thead>
+                    <tr>
+                        <th>Episode</th>
+                        <th>Title</th>
+                        <th>Resolution</th>
+                        <th style="text-align:right;">Duration</th>
+                        <th style="text-align:right;">Frames</th>
+                        <th style="text-align:right;">Detections</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>`;
+            s.episodes.forEach(ep => {
+                const dur = ep.duration ? formatDuration(ep.duration) : '-';
+                const status = ep.detections > 0
+                    ? '<span class="tag" style="background:#1a3a1a; color:#51cf66;">Detected</span>'
+                    : ep.frames > 0
+                        ? '<span class="tag" style="background:#3a3a1a; color:#ffd43b;">Sampled</span>'
+                        : '<span class="tag">Registered</span>';
+                html += `<tr>
+                    <td><strong>S${String(ep.season).padStart(2,'0')}E${String(ep.episode).padStart(2,'0')}</strong></td>
+                    <td>${ep.title || ''}</td>
+                    <td style="color:#888;">${ep.resolution || ''}</td>
+                    <td style="text-align:right; color:#888;">${dur}</td>
+                    <td style="text-align:right;">${ep.frames.toLocaleString()}</td>
+                    <td style="text-align:right;">${ep.detections.toLocaleString()}</td>
+                    <td>${status}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        }
+
+        html += '</div>';
+    });
+
+    el.innerHTML = html;
+});
+
+function formatDuration(secs) {
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return m + ':' + String(s).padStart(2, '0');
+}
+</script>
+{% endblock %}

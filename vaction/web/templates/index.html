@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Vaction — Home{% endblock %}
+{% block content %}
+<div style="padding-top:24px;">
+    <h1>Vaction</h1>
+    <p class="subtitle">Video Analysis & Content Tracking</p>
+
+    <div id="stats" class="grid-4 mb-24" style="display:none;">
+        <div class="card-flat text-center">
+            <div class="stat-value" id="statSeries">0</div>
+            <div class="stat-label">Series</div>
+        </div>
+        <div class="card-flat text-center">
+            <div class="stat-value" id="statEpisodes">0</div>
+            <div class="stat-label">Episodes</div>
+        </div>
+        <div class="card-flat text-center">
+            <div class="stat-value" id="statFrames">0</div>
+            <div class="stat-label">Frames</div>
+        </div>
+        <div class="card-flat text-center">
+            <div class="stat-value" id="statDetections">0</div>
+            <div class="stat-label">Detections</div>
+        </div>
+    </div>
+
+    <div class="grid-3">
+        <a href="/content" class="card clickable" style="text-decoration:none;">
+            <h2 style="color:#30d158;">Content</h2>
+            <p class="text-muted text-sm">Add videos, run detection, process faces. Manage your media pipeline.</p>
+        </a>
+        <a href="/analysis" class="card clickable" style="text-decoration:none;">
+            <h2 style="color:#0a84ff;">Analysis</h2>
+            <p class="text-muted text-sm">Interactive charts, theme analysis, drill down to frames, export data.</p>
+        </a>
+        <a href="/settings" class="card clickable" style="text-decoration:none;">
+            <h2 style="color:#bf5af2;">Settings</h2>
+            <p class="text-muted text-sm">Vocabulary, themes, face clusters, backups, system status.</p>
+        </a>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+fetch('/api/status').then(r=>r.json()).then(data=>{
+    if(!data.series||!data.series.length) return;
+    let eps=0, frames=0, dets=0;
+    data.series.forEach(s => { eps += s.total_episodes; frames += s.total_frames; dets += s.total_detections; });
+    document.getElementById('statSeries').textContent = data.series.length;
+    document.getElementById('statEpisodes').textContent = eps.toLocaleString();
+    document.getElementById('statFrames').textContent = frames.toLocaleString();
+    document.getElementById('statDetections').textContent = dets.toLocaleString();
+    document.getElementById('stats').style.display = 'grid';
+});
+</script>
+{% endblock %}

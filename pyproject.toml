@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vaction"
+version = "0.1.0"
+description = "Local video object categorization, indexing, and search over TV episodes"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "ultralytics>=8.0",
+    "insightface>=0.7",
+    "onnxruntime>=1.16",
+    "open-clip-torch>=2.20",
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+    "tqdm>=4.65",
+    "flask>=3.0",
+]
+
+[project.scripts]
+vaction = "vaction.cli:cli"
+vaction-web = "vaction.web.app:main"
+
+[tool.setuptools.packages.find]
+include = ["vaction*"]

@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block title %}Themes — Vaction{% endblock %}
+{% block content %}
+<h1>Themes</h1>
+<p class="subtitle">Group multiple detection tags into named themes for combined analysis</p>
+
+<div class="card">
+    <h2>Create Theme</h2>
+    <p style="color:#666; font-size:13px; margin-bottom:12px;">
+        A theme groups multiple tags so you can search/chart them as one unit.
+        Example: "vehicular_action" = car, truck, bus, van, motorcycle.
+    </p>
+    <div class="row">
+        <div class="form-group">
+            <label>Theme Name</label>
+            <input type="text" id="themeName" placeholder='e.g. vehicular_action' />
+        </div>
+        <div class="form-group" style="flex:2;">
+            <label>Description</label>
+            <input type="text" id="themeDesc" placeholder='e.g. All vehicle-related detections' />
+        </div>
+    </div>
+    <div class="form-group">
+        <label>Tags (comma-separated detection labels)</label>
+        <input type="text" id="themeTags" placeholder='e.g. car, truck, bus, van, motorcycle' />
+    </div>
+    <div id="tagHints" class="pill-row" style="margin-bottom:12px;"></div>
+    <button class="btn" onclick="createTheme()">Create Theme</button>
+</div>
+
+<div class="card">
+    <h2>Existing Themes</h2>
+    <div id="themesList">Loading...</div>
+</div>
+
+<div class="card">
+    <h2>Use Themes in Search</h2>
+    <p style="color:#666; font-size:13px;">
+        Once created, use a theme name in the Search tab's query or chart terms.
+        The system will automatically expand it to all grouped tags using OR logic.
+    </p>
+    <div class="row">
+        <div class="form-group">
+            <label>Series</label>
+            <select id="seriesSelect"><option value="">Loading...</option></select>
+        </div>
+        <div class="form-group">
+            <label>Theme</label>
+            <select id="themeSelect"><option value="">Select a theme</option></select>
+        </div>
+        <div class="form-group" style="flex:0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="btn" onclick="chartTheme()">Chart Theme</button>
+        </div>
+    </div>
+    <div class="chart-container" style="height:300px;">
+        <canvas id="themeChart"></canvas>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let themeChart = null;
+
+// Load series
+fetch('/api/series').then(r=>r.json()).then(data=>{
+    const sel = document.getElementById('seriesSelect');
+    sel.innerHTML = '<option value="">Select series</option>';
+    data.series.forEach(s => sel.innerHTML += `<option value="${s.name}">${s.name}</option>`);
+});
+
+// Load available detection labels for hints
+function loadTagHints() {
+    const series = document.getElementById('seriesSelect').value;
+    fetch('/api/labels' + (series ? '?series=' + encodeURIComponent(series) : '')).then(r=>r.json()).then(data=>{
+        const el = document.getElementById('tagHints');
+        el.innerHTML = data.labels.slice(0, 40).map(l =>
+            `<span class="pill" onclick="addTag('${l.label}')">${l.label} <span style="opacity:0.5">(${l.count})</span></span>`
+        ).join('');
+    });
+}
+document.getElementById('seriesSelect').addEventListener('change', loadTagHints);
+loadTagHints();
+
+function addTag(tag) {
+    const input = document.getElementById('themeTags');
+    const current = input.value.trim();
+    const tags = current ? current.split(',').map(t=>t.trim()) : [];
+    if (!tags.includes(tag)) {
+        tags.push(tag);
+        input.value = tags.join(', ');
+    }
+}
+
+function loadThemes() {
+    fetch('/api/themes').then(r=>r.json()).then(data=>{
+        const el = document.getElementById('themesList');
+        const sel = document.getElementById('themeSelect');
+        sel.innerHTML = '<option value="">Select a theme</option>';
+
+        if (!data.themes.length) {
+            el.innerHTML = '<p style="color:#666;">No themes created yet.</p>';
+            return;
+        }
+
+        let html = '<table><thead><tr><th>Name</th><th>Description</th><th>Tags</th><th></th></tr></thead><tbody>';
+        data.themes.forEach(t => {
+            sel.innerHTML += `<option value="${t.name}">${t.name}</option>`;
+            const tags = t.labels.map(l => `<span class="tag">${l}</span>`).join(' ');
+            html += `<tr>
+                <td><strong>${t.name}</strong></td>
+                <td style="color:#888; font-size:13px;">${t.description}</td>
+                <td>${tags}</td>
+                <td style="text-align:right;">
+                    <button class="btn btn-secondary" style="padding:2px 8px; font-size:11px;" onclick="deleteTheme(${t.id})">Delete</button>
+                </td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+        el.innerHTML = html;
+    });
+}
+
+function createTheme() {
+    const name = document.getElementById('themeName').value.trim();
+    const description = document.getElementById('themeDesc').value.trim();
+    const labels = document.getElementById('themeTags').value.split(',').map(t=>t.trim()).filter(Boolean);
+
+    if (!name || !labels.length) { alert('Enter a name and at least one tag.'); return; }
+
+    fetch('/api/themes', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, description, labels}),
+    }).then(r=>r.json()).then(data=>{
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('themeName').value = '';
+        document.getElementById('themeDesc').value = '';
+        document.getElementById('themeTags').value = '';
+        loadThemes();
+    });
+}
+
+function deleteTheme(id) {
+    if (!confirm('Delete this theme?')) return;
+    fetch(`/api/themes/${id}`, {method: 'DELETE'}).then(() => loadThemes());
+}
+
+function chartTheme() {
+    const series = document.getElementById('seriesSelect').value;
+    const themeName = document.getElementById('themeSelect').value;
+    if (!series || !themeName) { alert('Select a series and theme.'); return; }
+
+    // Fetch theme labels and chart them individually + as combined
+    fetch('/api/themes').then(r=>r.json()).then(data=>{
+        const theme = data.themes.find(t => t.name === themeName);
+        if (!theme) return;
+
+        // Chart each tag individually
+        const terms = theme.labels.join(',');
+        fetch(`/api/chart?series=${encodeURIComponent(series)}&terms=${encodeURIComponent(terms)}`)
+        .then(r=>r.json()).then(chartData=>{
+            if (chartData.error) { alert(chartData.error); return; }
+
+            const COLORS = ['#4a9eff','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#e599f7'];
+            const ctx = document.getElementById('themeChart').getContext('2d');
+            if (themeChart) themeChart.destroy();
+
+            themeChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: chartData.labels,
+                    datasets: chartData.datasets.map((ds, i) => ({
+                        label: ds.term,
+                        data: ds.data,
+                        backgroundColor: COLORS[i % COLORS.length] + '88',
+                        borderColor: COLORS[i % COLORS.length],
+                        borderWidth: 1,
+                    })),
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { labels: { color: '#ccc' } } },
+                    scales: {
+                        x: { stacked: true, ticks: { color: '#888' }, grid: { color: '#1a1a1a' } },
+                        y: { stacked: true, ticks: { color: '#888', callback: v => v.toFixed(3)+'%' }, grid: { color: '#1a1a1a' }, beginAtZero: true,
+                             title: { display: true, text: 'Episode Share (%)', color: '#888' } },
+                    },
+                },
+            });
+        });
+    });
+}
+
+loadThemes();
+</script>
+{% endblock %}
